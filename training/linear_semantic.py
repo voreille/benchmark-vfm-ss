@@ -30,7 +30,7 @@ class LinearSemantic(LightningModule):
             lr_multiplier_encoder=lr_multiplier_encoder,
         )
 
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["network"])
 
         self.ignore_idx = ignore_idx
         self.poly_lr_decay_power = poly_lr_decay_power

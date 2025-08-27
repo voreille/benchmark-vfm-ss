@@ -1,0 +1,17 @@
+trainer:
+  max_steps: 40000
+  val_check_interval: ~ 
+  check_val_every_n_epoch: 2
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+model:
+  class_path: training.linear_semantic.LinearSemantic
+  init_args:
+    network:
+      class_path: models.histo_linear_decoder.LinearDecoder
+      init_args:
+        encoder_name: "hf-hub:MahmoodLab/UNI2-h"
+data:
+  class_path: datasets.anorak.ANORAK
+  init_args:
+    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK
