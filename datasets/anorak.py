@@ -12,18 +12,19 @@ from datasets.transforms import CustomTransforms
 class ANORAK(LightningDataModule):
 
     def __init__(
-            self,
-            root,
-            devices,
-            num_workers: int,
-            fold: int = 0,
-            img_size: tuple[int, int] = (512, 512),
-            batch_size: int = 1,
-            num_classes: int = 7,
-            num_metrics: int = 1,
-            scale_range=(0.8, 1.2),
-            ignore_idx: int = 255,
-            overwrite_root: str = None,
+        self,
+        root,
+        devices,
+        num_workers: int,
+        fold: int = 0,
+        img_size: tuple[int, int] = (448, 448),
+        batch_size: int = 1,
+        num_classes: int = 7,
+        num_metrics: int = 1,
+        scale_range=(0.8, 1.2),
+        ignore_idx: int = 255,
+        overwrite_root: str = None,
+        prefetch_factor: int = 2,
     ) -> None:
         super().__init__(
             root=root,
@@ -34,6 +35,7 @@ class ANORAK(LightningDataModule):
             num_metrics=num_metrics,
             ignore_idx=ignore_idx,
             img_size=img_size,
+            prefetch_factor=prefetch_factor,
         )
         self.save_hyperparameters()
 
@@ -68,7 +70,7 @@ class ANORAK(LightningDataModule):
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
         train_ids, val_ids, test_ids = self._get_split_ids()
 
-        if stage == "fit" or stage is None:
+        if stage == "fit" or stage == "validate" or stage is None:
             self.train_dataset = Dataset(
                 train_ids,
                 self.images_dir,

@@ -17,6 +17,7 @@ class LightningDataModule(lightning.LightningDataModule):
         ignore_idx: Optional[int] = None,
         pin_memory: bool = True,
         persistent_workers: bool = True,
+        prefetch_factor: int = 2,
     ) -> None:
         super().__init__()
 
@@ -35,6 +36,7 @@ class LightningDataModule(lightning.LightningDataModule):
             "num_workers": num_workers,
             "pin_memory": pin_memory,
             "batch_size": batch_size,
+            "prefetch_factor": prefetch_factor if num_workers > 0 else None, 
         }
 
     @staticmethod

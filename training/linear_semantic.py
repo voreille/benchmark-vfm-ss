@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import wandb
@@ -5,9 +7,11 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
 
 from training.lightning_module import LightningModule
+from training.tiler import Tiler
 
 
 class LinearSemantic(LightningModule):
+
     def __init__(
         self,
         network: nn.Module,
@@ -20,6 +24,7 @@ class LinearSemantic(LightningModule):
         poly_lr_decay_power: float = 0.9,
         lr_multiplier_encoder: float = 0.1,
         freeze_encoder: bool = False,
+        tiler: Optional[Tiler] = None,
     ):
         super().__init__(
             img_size=img_size,
@@ -28,6 +33,7 @@ class LinearSemantic(LightningModule):
             weight_decay=weight_decay,
             lr=lr,
             lr_multiplier_encoder=lr_multiplier_encoder,
+            tiler=tiler,
         )
 
         self.save_hyperparameters(ignore=["network"])
@@ -65,8 +71,11 @@ class LinearSemantic(LightningModule):
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops)
-        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
-        logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
+        crop_logits = F.interpolate(crop_logits,
+                                    self.img_size,
+                                    mode="bilinear")
+        logits = self.revert_window_logits_semantic(crop_logits, origins,
+                                                    img_sizes)
 
         if is_notebook:
             return logits
@@ -81,7 +90,9 @@ class LinearSemantic(LightningModule):
                 targets[0],
                 logits=logits[0],
             )
-            self.trainer.logger.experiment.log({name: [wandb.Image(plot)]})  # type: ignore
+            if hasattr(self.trainer.logger.experiment, "log"):
+                self.trainer.logger.experiment.log({name: [wandb.Image(plot)]
+                                                    })  # type: ignore
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
@@ -90,12 +101,14 @@ class LinearSemantic(LightningModule):
         optimizer = super().configure_optimizers()
 
         lr_scheduler = {
-            "scheduler": PolynomialLR(
+            "scheduler":
+            PolynomialLR(
                 optimizer,
                 int(self.trainer.estimated_stepping_batches),
                 self.poly_lr_decay_power,
             ),
-            "interval": "step",
+            "interval":
+            "step",
         }
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}

@@ -28,9 +28,12 @@ class Uni2Encoder(nn.Module):
             "model_name": encoder_name,
             "pretrained": pretrained,
         }
+        if patch_size != 14:
+            raise ValueError("Uni2 only supports patch size of 14")
+
         timm_kwargs = {
             'img_size': 224,
-            'patch_size': 14,
+            'patch_size': patch_size,
             'depth': 24,
             'num_heads': 24,
             'init_values': 1e-5,

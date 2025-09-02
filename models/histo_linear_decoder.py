@@ -10,7 +10,7 @@ class LinearDecoder(Uni2Encoder):
         num_classes,
         img_size,
         sub_norm=False,
-        patch_size=16,
+        patch_size=14,
         pretrained=True,
         ckpt_path="",
     ):
