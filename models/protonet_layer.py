@@ -40,6 +40,9 @@ class ProtoNet(torch.nn.Module):
         self.register_buffer("support_counts_",
                              torch.empty(0, dtype=torch.long),
                              persistent=True)
+        self.register_buffer("embedding_dim_",
+                             torch.empty(0, dtype=torch.long),
+                             persistent=True)
 
         self.num_classes = num_classes
         self.ignore_idx = ignore_idx
@@ -80,20 +83,28 @@ class ProtoNet(torch.nn.Module):
             for img, target in zip(imgs, targets):
                 crops, target_crops = self.tile_image(img, target)
                 n_crops = crops.shape[0]
-                target_crops = self.pool_target(target_crops)
+                target_crops = self.pool_target(
+                    target_crops)  # (n_crops, n_class, h, w)
+                mask = target_crops.any(dim=1).view(n_crops,
+                                                    -1)  # (n_crops, n_tokens)
+
                 with torch.inference_mode():
-                    X = encoder(crops.to(device)) # (n_crops, n_tokens, D)
+                    X = encoder(crops.to(device))  # (n_crops, n_tokens, D)
 
                 if D is None:
                     D = X.shape[2]
                     running_sum = torch.zeros(D, device=device)
 
                 X = X.reshape(-1, D)
+                mask = mask.reshape(-1)  # (n_crops * n_tokens,)
+                X = X[mask]  # (n_valid, D)
+
                 running_sum += X.sum(dim=0)
-                total += n_crops
+                total += X.shape[0]
 
         mu = running_sum / total
         self.mean_ = mu[None, :]  # [1 x D]
+        self.embedding_dim_ = D
 
     def fit_prototype(
         self,
@@ -101,6 +112,9 @@ class ProtoNet(torch.nn.Module):
         encoder: torch.nn.Module,
         device: torch.device,
     ) -> None:
+
+        running_sum = None
+        total = 0
 
         for batch in support_dataloader:
             imgs, targets = batch
@@ -119,14 +133,8 @@ class ProtoNet(torch.nn.Module):
         self.prototype_embeddings_ = self.prototype_embeddings_ / self.support_counts_[:,
                                                                                        None]
 
-    def aggregate_prototypes(self, X: torch.Tensor, y: torch.Tensor) -> None:
-
-        if self.prototype_embeddings_ is None:
-            self.n_classes_ = y.shape[1]
-            self.feature_dim_ = X.shape[1]
-            self.prototype_embeddings_ = torch.zeros(
-                self.n_classes_, self.feature_dim_).to(X.device)
-            self.support_counts_ = torch.zeros(self.n_classes_).to(X.device)
+    def aggregate_prototypes(self, X: torch.Tensor, y: torch.Tensor,
+                             running_sum: torch.Tensor, total: int) -> None:
 
         ### Apply centering and normalization (if set)
         if self.center_feats:
@@ -135,8 +143,8 @@ class ProtoNet(torch.nn.Module):
         if self.normalize_feats:
             X = normalize(X, dim=-1, p=2)
 
-        self.prototype_embeddings_ = self.prototype_embeddings_ + y.T @ X
-        self.support_counts_ = self.support_counts_ + y.sum(dim=0)
+        running_sum += y.T @ X
+        total += y.shape[0]
 
     @torch.compiler.disable
     def tile_image(self, img: torch.Tensor, target: torch.Tensor):
