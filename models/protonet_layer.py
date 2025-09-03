@@ -1,17 +1,17 @@
-"""
-Implementation adapted from: https://github.com/mbanani/lgssl/blob/df45bae647fc24dce8a6329eb697944053e9a8a0/lgssl/evaluation/fewshot.py#L9C3-L9C3
-TODO: pass the encoder as an args to the fit method ?
-"""
-
-from typing import Tuple
-
-import numpy as np
-import pandas as pd
 import torch
 from torch.nn.functional import normalize, one_hot, pad
 
 
-class ProtoNet:
+def _infer_device_from_encoder(encoder: torch.nn.Module) -> torch.device:
+    for p in encoder.parameters():
+        return p.device
+    for b in encoder.buffers():
+        return b.device
+    # Fallback if encoder has no params/buffers (rare)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class ProtoNet(torch.nn.Module):
     """
     Sklearn-like class for SimpleShot.
 
@@ -22,54 +22,121 @@ class ProtoNet:
                  metric: str = 'L2',
                  center_feats: bool = True,
                  normalize_feats: bool = True,
-                 encoder: torch.nn.Module = None,
                  num_classes: int = 7,
                  ignore_idx: int = -1,
                  patch_size: int = 14,
                  img_size: int = 224) -> None:
+
+        super().__init__()
         self.metric = metric
         self.center_feats = center_feats
         self.normalize_feats = normalize_feats
 
-        self.mean_ = None
-        self.prototype_embeddings_ = None
-        self.support_counts_ = None
-        self.prototype_labels_ = None
+        self.register_buffer("prototype_embeddings_",
+                             torch.empty(0, 0),
+                             persistent=True)
+        self.register_buffer("mean_", torch.empty(0),
+                             persistent=True)  # [1 x D] or empty
+        self.register_buffer("support_counts_",
+                             torch.empty(0, dtype=torch.long),
+                             persistent=True)
 
-        self.encoder = encoder
         self.num_classes = num_classes
         self.ignore_idx = ignore_idx
         self.patch_size = patch_size
         self.img_size = img_size
-        self.device = encoder.device if encoder is not None else "cpu"
 
         self.pool_target = torch.nn.AvgPool2d(kernel_size=self.patch_size,
                                               stride=self.patch_size)
 
-    def fit(self, support_dataloader) -> None:
+    @torch.no_grad()
+    def fit(
+        self,
+        support_dataloader: torch.utils.data.DataLoader,
+        encoder: torch.nn.Module,
+    ) -> None:
         """
         support_dataloader must output X and y, where y is a one-hot encoding so NxC
         and X is a feature matrix of shape NxD
         """
 
-        self.fit_mean(support_dataloader)
-        self.fit_prototype(support_dataloader)
+        device = _infer_device_from_encoder(encoder)
+        self.to(device)
 
-    def fit_prototype(self, support_dataloader):
+        self.fit_mean(support_dataloader, encoder, device)
+        self.fit_prototype(support_dataloader, encoder, device)
+
+    def fit_mean(self, support_dataloader: torch.utils.data.DataLoader,
+                 encoder: torch.nn.Module, device: torch.device) -> None:
+
+        running_sum = None
+        D = None
+        total = 0
+
         for batch in support_dataloader:
             imgs, targets = batch
-            targets = ProtoNet.to_per_pixel_targets_semantic(targets)
+            targets = self.to_per_pixel_targets_semantic(targets)
 
             for img, target in zip(imgs, targets):
                 crops, target_crops = self.tile_image(img, target)
                 n_crops = crops.shape[0]
                 target_crops = self.pool_target(target_crops)
                 with torch.inference_mode():
-                    X = self.encoder(crops.to(self.device))
-                self.aggregate_prototypes(X, target.view(n_crops, -1).to(self.device))
+                    X = encoder(crops.to(device)) # (n_crops, n_tokens, D)
+
+                if D is None:
+                    D = X.shape[2]
+                    running_sum = torch.zeros(D, device=device)
+
+                X = X.reshape(-1, D)
+                running_sum += X.sum(dim=0)
+                total += n_crops
+
+        mu = running_sum / total
+        self.mean_ = mu[None, :]  # [1 x D]
+
+    def fit_prototype(
+        self,
+        support_dataloader: torch.utils.data.DataLoader,
+        encoder: torch.nn.Module,
+        device: torch.device,
+    ) -> None:
+
+        for batch in support_dataloader:
+            imgs, targets = batch
+            targets = self.to_per_pixel_targets_semantic(targets)
+
+            for img, target in zip(imgs, targets):
+                crops, target_crops = self.tile_image(img, target)
+                n_crops = crops.shape[0]
+                target_crops = self.pool_target(target_crops)
+                with torch.inference_mode():
+                    X = encoder(crops.to(device))
+                self.aggregate_prototypes(
+                    X,
+                    target_crops.view(n_crops, -1).to(device))
 
         self.prototype_embeddings_ = self.prototype_embeddings_ / self.support_counts_[:,
                                                                                        None]
+
+    def aggregate_prototypes(self, X: torch.Tensor, y: torch.Tensor) -> None:
+
+        if self.prototype_embeddings_ is None:
+            self.n_classes_ = y.shape[1]
+            self.feature_dim_ = X.shape[1]
+            self.prototype_embeddings_ = torch.zeros(
+                self.n_classes_, self.feature_dim_).to(X.device)
+            self.support_counts_ = torch.zeros(self.n_classes_).to(X.device)
+
+        ### Apply centering and normalization (if set)
+        if self.center_feats:
+            X = X - self.mean_
+
+        if self.normalize_feats:
+            X = normalize(X, dim=-1, p=2)
+
+        self.prototype_embeddings_ = self.prototype_embeddings_ + y.T @ X
+        self.support_counts_ = self.support_counts_ + y.sum(dim=0)
 
     @torch.compiler.disable
     def tile_image(self, img: torch.Tensor, target: torch.Tensor):
@@ -84,6 +151,7 @@ class ProtoNet:
         C, H, W = img.shape
         num_classes, H_t, W_t = target.shape
         assert (H, W) == (H_t, W_t), "img/target sizes must match"
+        assert num_classes == self.num_classes, "Inconsistent number of classes"
 
         # minimal pad (right, bottom) to make divisible by (Th, Tw)
         pad_h = (-H) % self.img_size
@@ -116,45 +184,6 @@ class ProtoNet:
 
         return img_tiles, tgt_tiles
 
-    def aggregate_prototypes(self, X: torch.Tensor, y: torch.Tensor) -> None:
-
-        if self.prototype_embeddings_ is None:
-            self.n_classes_ = y.shape[1]
-            self.feature_dim_ = X.shape[1]
-            self.prototype_embeddings_ = torch.zeros(
-                self.n_classes_, self.feature_dim_).to(X.device)
-            self.support_counts_ = torch.zeros(self.n_classes_).to(X.device)
-
-        ### Apply centering and normalization (if set)
-        if self.center_feats:
-            X = X - self.mean_
-
-        if self.normalize_feats:
-            X = normalize(X, dim=-1, p=2)
-
-        self.prototype_embeddings_ = self.prototype_embeddings_ + y.T @ X
-        self.support_counts_ = self.support_counts_ + y.sum(dim=0)
-
-    def fit_mean(self, support_dataloader) -> None:
-        for batch in support_dataloader:
-            X, y = batch
-
-            if self.prototype_labels_ is None:
-                self.prototype_labels_ = set(torch.unique(y))
-            self.prototype_labels_ = self.prototype_labels_.union(
-                set(torch.unique(y)))
-
-            b, feature_dim = X.shape
-            if self.mean_ is None:
-                self.mean_ = torch.zeros(feature_dim).to(X.device)
-                self.support_size_ = 0
-            self.mean_ += X.sum(dim=0)
-            self.support_size_ += b
-
-        self.mean_ = self.mean_ / self.support_size_
-        self.prototype_labels_ = torch.tensor(self.prototype_labels_).to(
-            X.device)
-
     def predict(self, X: torch.Tensor) -> torch.Tensor:
         """
         Gets the closest prototype for each query in X.
@@ -183,25 +212,19 @@ class ProtoNet:
             dim=1).indices]  # [N,] label vector
         return labels_pred
 
-    def to_per_pixel_targets_semantic(
-        self,
-        targets: list[dict],
-        num_classes: int = 7,
-    ):
+    def to_per_pixel_targets_semantic(self, targets: list[dict]):
         per_pixel_targets = []
         for target in targets:
-            per_pixel_target = torch.full(
-                (num_classes, target["masks"].shape[-2:]),
-                self.ignore_idx,
-                dtype=torch.float(),
+            h, w = target["masks"].shape[-2:]
+            per_pixel_target = torch.zeros(
+                (self.num_classes, h, w),
+                dtype=torch.float,
                 device=target["labels"].device,
             )
 
             for i, mask in enumerate(target["masks"]):
-                one_hot_label = one_hot(target["labels"][i],
-                                        num_classes=num_classes).float()
-                # TODO: don't see how it can work to
-                per_pixel_target[mask] = one_hot_label
+                class_id = target["labels"][i].item()
+                per_pixel_target[class_id] += mask.float()
 
             per_pixel_targets.append(per_pixel_target)
 

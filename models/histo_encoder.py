@@ -15,12 +15,12 @@ class Uni2Encoder(nn.Module):
 
     def __init__(
         self,
-        encoder_name,
-        img_size: tuple[int, int],
-        ckpt_path,
-        sub_norm,
-        patch_size,
-        pretrained,
+        encoder_name: str = "hf-hub:MahmoodLab/UNI2-h",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        patch_size: int = 14,
+        pretrained: bool = True,
     ):
         super().__init__()
 
