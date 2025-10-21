@@ -37,11 +37,6 @@ class ANORAK(LightningDataModule):
             img_size=img_size,
             prefetch_factor=prefetch_factor,
         )
-        self.save_hyperparameters()
-
-        self.transforms = CustomTransforms(img_size=img_size,
-                                           scale_range=scale_range)
-
         if overwrite_root:
             root = overwrite_root
 
@@ -54,8 +49,9 @@ class ANORAK(LightningDataModule):
         split_df = pd.read_csv(root_dir / "split_df.csv")
         self.split_df = split_df[split_df["fold"] == fold]
 
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.save_hyperparameters()
+        self.transforms = CustomTransforms(img_size=img_size,
+                                           scale_range=scale_range)
 
     def _get_split_ids(self):
         return (
@@ -67,28 +63,33 @@ class ANORAK(LightningDataModule):
             ["image_id"].unique().tolist(),
         )
 
+    def compute_class_weights(self):
+        from datasets.stats import compute_class_weights_from_ids
+        train_ids, _, _ = self._get_split_ids()
+        return compute_class_weights_from_ids(
+            train_ids,
+            self.masks_dir,
+            self.num_classes,
+            ignore_idx=self.ignore_idx,
+        )
+
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
         train_ids, val_ids, test_ids = self._get_split_ids()
 
-        if stage == "fit" or stage == "validate" or stage is None:
-            self.train_dataset = Dataset(
-                train_ids,
-                self.images_dir,
-                self.masks_dir,
-                transforms=self.transforms,
-            )
-            self.val_dataset = Dataset(
-                val_ids,
-                self.images_dir,
-                self.masks_dir,
-            )
+        if stage in ("fit", "validate", None):
+            self.train_dataset = Dataset(train_ids,
+                                         self.images_dir,
+                                         self.masks_dir,
+                                         transforms=self.transforms)
+            self.val_dataset = Dataset(val_ids, self.images_dir,
+                                       self.masks_dir)
 
-        if stage == "test" or stage is None:
-            self.test_dataset = Dataset(
-                test_ids,
-                self.images_dir,
-                self.masks_dir,
-            )
+            # compute once per fold for training
+            self.class_weights = self.compute_class_weights()
+
+        if stage in ("test", None):
+            self.test_dataset = Dataset(test_ids, self.images_dir,
+                                        self.masks_dir)
 
         return self
 

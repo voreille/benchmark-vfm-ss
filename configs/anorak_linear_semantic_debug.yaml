@@ -8,6 +8,7 @@ model:
   class_path: training.linear_semantic.LinearSemantic
   init_args:
     freeze_encoder: True
+    # class_weights: [0.2017, 6.5578, 13.1251, 1.3079, 4.0261, 1.9674, 3.4201]
     network:
       class_path: models.histo_linear_decoder.LinearDecoder
       init_args:
@@ -17,8 +18,8 @@ model:
       class_path: training.tiler.GridPadTiler
       init_args:
         tile: 448
-        stride: 224           # overlap = 64
-        weighted_blend: false # or true
+        stride: 224           # overlap
+        weighted_blend: false # or true, true will use Hanning windows to blend
         pad_mode: "reflect"   # optional; nice for images
         pad_value: 0.0
 data:

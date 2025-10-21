@@ -11,7 +11,7 @@ from training.tiler import Tiler
 from training.histo_loss import CrossEntropyDiceLoss
 
 
-class LinearSemantic(LightningModule):
+class UnetSemantic(LightningModule):
 
     def __init__(
         self,

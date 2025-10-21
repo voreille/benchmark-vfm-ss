@@ -1,5 +1,9 @@
+"""
+TODO: sample training example per dominant pattern
+"""
 from pathlib import Path
 from typing import Union
+import random
 
 import pandas as pd
 from torch.utils.data import DataLoader
@@ -12,21 +16,23 @@ from datasets.transforms import CustomTransforms
 class ANORAK_FS(LightningDataModule):
 
     def __init__(
-        self,
-        root,
-        devices,
-        num_workers: int,
-        fold: int = 0,
-        img_size: tuple[int, int] = (448, 448),
-        batch_size: int = 1,
-        num_classes: int = 7,
-        num_metrics: int = 1,
-        scale_range=(0.8, 1.2),
-        ignore_idx: int = 255,
-        overwrite_root: str = None,
-        prefetch_factor: int = 2,
-        persistent_workers: bool = False,
-        pin_memory: bool = False,
+            self,
+            root,
+            devices,
+            num_workers: int,
+            fold: int = 0,
+            img_size: tuple[int, int] = (448, 448),
+            batch_size: int = 1,
+            num_classes: int = 7,
+            num_metrics: int = 1,
+            scale_range=(0.8, 1.2),
+            ignore_idx: int = 255,
+            overwrite_root: str = None,
+            prefetch_factor: int = 2,
+            persistent_workers: bool = False,
+            pin_memory: bool = False,
+            n_training_samples:
+        int = -1,  # just for debugging now, will be per dominant pattern
     ) -> None:
         super().__init__(
             root=root,
@@ -41,7 +47,7 @@ class ANORAK_FS(LightningDataModule):
             persistent_workers=persistent_workers,
             pin_memory=pin_memory,
         )
-        self.save_hyperparameters()
+        self.n_training_samples = n_training_samples
 
         # self.transforms = CustomTransforms(img_size=img_size,
         #                                    scale_range=scale_range)
@@ -58,8 +64,7 @@ class ANORAK_FS(LightningDataModule):
         split_df = pd.read_csv(root_dir / "split_df.csv")
         self.split_df = split_df[split_df["fold"] == fold]
 
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.save_hyperparameters()
 
     def _get_split_ids(self):
         return (
@@ -73,6 +78,8 @@ class ANORAK_FS(LightningDataModule):
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
         train_ids, val_ids, test_ids = self._get_split_ids()
+        if self.n_training_samples > 0:
+            train_ids = random.sample(train_ids, self.n_training_samples)
 
         if stage == "fit" or stage == "validate" or stage is None:
             self.train_dataset = Dataset(

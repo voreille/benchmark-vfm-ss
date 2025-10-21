@@ -1,5 +1,7 @@
+from typing import Optional
 import torch
 from torch.nn.functional import normalize, one_hot, pad
+from tqdm import tqdm
 
 
 def _infer_device_from_encoder(encoder: torch.nn.Module) -> torch.device:
@@ -40,9 +42,6 @@ class ProtoNet(torch.nn.Module):
         self.register_buffer("support_counts_",
                              torch.empty(0, dtype=torch.long),
                              persistent=True)
-        self.register_buffer("embedding_dim_",
-                             torch.empty(0, dtype=torch.long),
-                             persistent=True)
 
         self.num_classes = num_classes
         self.ignore_idx = ignore_idx
@@ -76,12 +75,13 @@ class ProtoNet(torch.nn.Module):
         D = None
         total = 0
 
-        for batch in support_dataloader:
+        for batch in tqdm(support_dataloader, desc="Fitting mean"):
             imgs, targets = batch
             targets = self.to_per_pixel_targets_semantic(targets)
 
             for img, target in zip(imgs, targets):
-                crops, target_crops = self.tile_image(img, target)
+                crops = self.tile_image(img)
+                target_crops = self.tile_image(target)
                 n_crops = crops.shape[0]
                 target_crops = self.pool_target(
                     target_crops)  # (n_crops, n_class, h, w)
@@ -104,7 +104,6 @@ class ProtoNet(torch.nn.Module):
 
         mu = running_sum / total
         self.mean_ = mu[None, :]  # [1 x D]
-        self.embedding_dim_ = D
 
     def fit_prototype(
         self,
@@ -115,26 +114,48 @@ class ProtoNet(torch.nn.Module):
 
         running_sum = None
         total = 0
-
-        for batch in support_dataloader:
+        D = self.mean_.shape[-1]
+        for batch in tqdm(support_dataloader, desc="Fitting prototype"):
             imgs, targets = batch
             targets = self.to_per_pixel_targets_semantic(targets)
 
             for img, target in zip(imgs, targets):
                 crops, target_crops = self.tile_image(img, target)
                 n_crops = crops.shape[0]
-                target_crops = self.pool_target(target_crops)
+                target_crops = self.pool_target(
+                    target_crops)  # (n_crops, n_class, h, w)
+                mask = target_crops.any(dim=1).view(n_crops,
+                                                    -1)  # (n_crops, n_tokens)
+                target_crops = target_crops.view(n_crops, self.num_classes, -1)
+                target_crops = torch.transpose(
+                    target_crops, 1, 2)  # (n_crops, n_tokens, num_classes)
+                target_crops = target_crops.reshape(
+                    -1, self.num_classes)  # (n_crops * n_tokens, num_classes)
+
                 with torch.inference_mode():
                     X = encoder(crops.to(device))
-                self.aggregate_prototypes(
-                    X,
-                    target_crops.view(n_crops, -1).to(device))
 
-        self.prototype_embeddings_ = self.prototype_embeddings_ / self.support_counts_[:,
-                                                                                       None]
+                if running_sum is None:
+                    running_sum = torch.zeros(
+                        self.num_classes,
+                        D,
+                        device=device,
+                    )
+
+                X = X.reshape(-1, D)
+                mask = mask.reshape(-1)  # (n_crops * n_tokens,)
+                X = X[mask]  # (n_valid, D)
+                target_crops = target_crops[mask]  # (n_valid, num_classes)
+                target_crops = target_crops.to(device)
+
+                running_sum = self.aggregate_prototypes(
+                    X, target_crops, running_sum)
+                total += X.shape[0]
+
+        self.prototype_embeddings_ = running_sum / total
 
     def aggregate_prototypes(self, X: torch.Tensor, y: torch.Tensor,
-                             running_sum: torch.Tensor, total: int) -> None:
+                             running_sum: torch.Tensor) -> torch.Tensor:
 
         ### Apply centering and normalization (if set)
         if self.center_feats:
@@ -144,10 +165,13 @@ class ProtoNet(torch.nn.Module):
             X = normalize(X, dim=-1, p=2)
 
         running_sum += y.T @ X
-        total += y.shape[0]
+        return running_sum
 
     @torch.compiler.disable
-    def tile_image(self, img: torch.Tensor, target: torch.Tensor):
+    def tile_image(
+        self,
+        img: torch.Tensor,
+    ) -> torch.Tensor:
         """
         img:     (C, H, W)
         target:  (num_classes, H, W)  -- e.g., one-hot planes
@@ -155,57 +179,37 @@ class ProtoNet(torch.nn.Module):
           crops_img:    (N, C, Th, Tw)
           crops_target: (N, num_classes, Th, Tw)
         """
-        assert img.dim() == 3 and target.dim() == 3, "Expect (C,H,W) tensors"
         C, H, W = img.shape
-        num_classes, H_t, W_t = target.shape
-        assert (H, W) == (H_t, W_t), "img/target sizes must match"
-        assert num_classes == self.num_classes, "Inconsistent number of classes"
-
         # minimal pad (right, bottom) to make divisible by (Th, Tw)
         pad_h = (-H) % self.img_size
         pad_w = (-W) % self.img_size
 
         img_b = img.unsqueeze(0)  # (1,C,H,W)
-        tgt_b = target.unsqueeze(0)  # (1,Ct,H,W)
 
         # pad=(left, right, top, bottom) for 2D in F.pad
         if pad_h or pad_w:
             img_b = pad(img_b, (0, pad_w, 0, pad_h), mode="constant", value=0)
-            tgt_b = pad(tgt_b, (0, pad_w, 0, pad_h), mode="constant", value=0)
 
-        # _, _, H_pad, W_pad = img_b.shape
-        # n_h = H_pad // self.img_size
-        # n_w = W_pad // self.img_size
-
-        # Unfold into non-overlapping tiles
-        # Result shapes: (1, C, n_h, n_w, Th, Tw) -> permute/reshape to (N, C, Th, Tw)
         img_tiles = (img_b.unfold(2, self.img_size, self.img_size).unfold(
             3, self.img_size,
             self.img_size).permute(0, 2, 3, 1, 4,
                                    5).reshape(-1, C, self.img_size,
                                               self.img_size))
-        tgt_tiles = (tgt_b.unfold(2, self.img_size, self.img_size).unfold(
-            3, self.img_size,
-            self.img_size).permute(0, 2, 3, 1, 4,
-                                   5).reshape(-1, num_classes, self.img_size,
-                                              self.img_size))
 
-        return img_tiles, tgt_tiles
+        return img_tiles
 
-    def predict(self, X: torch.Tensor) -> torch.Tensor:
+    def predict(self, imgs: list[torch.Tensor],
+                encoder: torch.nn.Module) -> torch.Tensor:
         """
-        Gets the closest prototype for each query in X.
 
-        Args:
-            X (torch.Tensor): [N x D]-dim query feature matrix (N: num samples, D: feature dim)
-
-        Returns:
-            labels_pred (torch.Tensor): N-dim label vector for X (labels assigned from cloest prototype for each query in X)
         """
 
         ### Apply centering and normalization (if set)
-        if self.center_feats:
-            X = X - self.mean_
+        for img in imgs:
+
+            X = encoder(img)
+            if self.center_feats:
+                X = X - self.mean_
 
         if self.normalize_feats:
             X = normalize(X, dim=-1, p=2)
