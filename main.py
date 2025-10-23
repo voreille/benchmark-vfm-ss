@@ -107,12 +107,14 @@ def cli_main():
         save_config_callback=None,
         seed_everything_default=0,
         trainer_defaults={
-            "precision": "16-mixed",
+            "precision": "b16-mixed", # UNI2 was trained with b16-mixed
             "log_every_n_steps": 1,
             "enable_model_summary": False,
             "callbacks": [ModelSummary(max_depth=2)],
             "devices": 1,
             "accumulate_grad_batches": 16,
+            "gradient_clip_val": 1,
+            "gradient_clip_algorithm": "norm",
         },
     )
 
