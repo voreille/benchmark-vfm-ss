@@ -9,12 +9,12 @@ import torch.nn.functional as F
 # ---------- small blocks ----------
 class Conv2DBlock(nn.Module):
 
-    def __init__(self, in_ch, out_ch, k=3, dropout=0.0):
+    def __init__(self, in_ch, out_ch, k=3, dropout=0.0, num_groups=8):
         super().__init__()
         pad = (k - 1) // 2
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, k, padding=pad, bias=False),
-            nn.BatchNorm2d(out_ch),
+            nn.GroupNorm(num_groups=num_groups, num_channels=out_ch),
             nn.ReLU(inplace=True),
             nn.Dropout2d(dropout) if dropout > 0 else nn.Identity(),
         )

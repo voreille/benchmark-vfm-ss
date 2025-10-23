@@ -9,6 +9,7 @@ from timm.layers import (
     resample_abs_pos_embed_nhwc,
     resample_patch_embed,
 )
+from torchvision.models import ResNet50_Weights, resnet50
 
 
 class ViTEncoderPyramid(
@@ -256,6 +257,13 @@ class ViTEncoderPyramidHooks(nn.Module):
         self.vit = vit
         self.layers = tuple(extract_layers)
         self.has_cls = has_cls
+
+        if hasattr(vit, "patch_embed"):
+            self.patch_size = vit.patch_embed.patch_size
+        else:
+            raise ValueError(
+                "vit.patch_embed not found; cannot infer patch size.")
+
         if hasattr(vit, "num_prefix_tokens"):
             self.num_prefix_tokens = vit.num_prefix_tokens
         else:
@@ -322,23 +330,20 @@ class ViTEncoderPyramidHooks(nn.Module):
             h.remove()
         self._handles = []
 
-    @staticmethod
-    def _infer_grid(N_spatial: int) -> Tuple[int, int]:
-        # assume square grid (Ht = Wt). This is standard for ViT patch grids.
-        root = int(math.isqrt(N_spatial))
-        if root * root != N_spatial:
-            raise ValueError(
-                f"Token grid not square: {N_spatial} spatial tokens")
-        return root, root
-
-    def _tokens_to_map(self, tokens: torch.Tensor) -> torch.Tensor:
+    def _tokens_to_map(self, tokens: torch.Tensor, Ht: int,
+                       Wt: int) -> torch.Tensor:
         """
         tokens: [B, N, D] including extra tokens (cls/reg if present)
         returns: [B, D, Ht, Wt]
         """
         B, N, D = tokens.shape
         spatial = tokens[:, self.num_prefix_tokens:, :]  # drop extra tokens
-        Ht, Wt = self._infer_grid(spatial.shape[1])
+        Nsp = spatial.shape[1]
+        if Nsp != Ht * Wt:
+            raise RuntimeError(
+                f"Token count {Nsp} != Ht*Wt ({Ht*Wt}). "
+                "Pad input to multiples of patch size or handle custom PatchEmbed."
+            )
         fmap = spatial.transpose(1, 2).reshape(B, D, Ht, Wt)
         return fmap
 
@@ -350,6 +355,7 @@ class ViTEncoderPyramidHooks(nn.Module):
         self._stash.clear()
 
         B, _, H, W = x.shape
+        Ht, Wt = H // self.patch_size[0], W // self.patch_size[1]
 
         # Run model (timm ViTs expose forward_features; fallback to forward)
         if hasattr(self.vit, "forward_features"):
@@ -386,10 +392,77 @@ class ViTEncoderPyramidHooks(nn.Module):
 
         out: Dict[str, torch.Tensor] = {}
         for k, tok in assign.items():
-            fmap = self._tokens_to_map(tok)  # [B, D, Ht, Wt] inferred
+            fmap = self._tokens_to_map(tok, Ht, Wt)  # [B, D, Ht, Wt] inferred
             fmap = self.proj[k](fmap)  # D -> C_k (per scale)
             out[k] = F.interpolate(fmap,
                                    size=target[k],
                                    mode="bilinear",
                                    align_corners=False)
         return out
+
+
+class ResNetPyramidAdapter(nn.Module):
+    """
+    Adapter for torchvision ResNet-50.
+
+    Contract:
+        forward(x) -> {
+            "s4":  [B, C4,  H/4,  W/4],   # layer1
+            "s8":  [B, C8,  H/8,  W/8],   # layer2
+            "s16": [B, C16, H/16, W/16],  # layer3
+            "s32": [B, C32, H/32, W/32],  # layer4
+        }
+
+    Notes:
+    - Stem: conv1(stride=2) -> bn1 -> relu -> maxpool(stride=2) gives /4.
+    - Channels before projection: {256, 512, 1024, 2048}.
+    - You can freeze the backbone by setting `freeze_backbone=True`.
+    """
+
+    def __init__(
+        self,
+        resnet: nn.Module,
+        pyramid_channels: Optional[Dict[str, int]] = None,
+    ):
+        super().__init__()
+        self.backbone = resnet
+
+        if pyramid_channels is None:
+            pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
+        self.pyramid_channels = dict(pyramid_channels)
+
+        in_ch = {"s4": 256, "s8": 512, "s16": 1024, "s32": 2048}
+        self.proj = nn.ModuleDict({
+            k:
+            nn.Conv2d(in_ch[k],
+                      self.pyramid_channels[k],
+                      kernel_size=1,
+                      bias=False)
+            for k in ("s4", "s8", "s16", "s32")
+        })
+
+    def _forward_stem(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.backbone.conv1(x)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)  # /4
+        return x
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+
+        B, _, H, W = x.shape
+        # stem (/4)
+        c1 = self._forward_stem(x)
+        # stages
+        c2 = self.backbone.layer1(c1)  # /4   (256 ch)
+        c3 = self.backbone.layer2(c2)  # /8   (512 ch)
+        c4 = self.backbone.layer3(c3)  # /16  (1024 ch)
+        c5 = self.backbone.layer4(c4)  # /32  (2048 ch)  (or /16 if dilated)
+
+        # project to decoder channels
+        s4 = self.proj["s4"](c2)
+        s8 = self.proj["s8"](c3)
+        s16 = self.proj["s16"](c4)
+        s32 = self.proj["s32"](c5)
+
+        return {"s4": s4, "s8": s8, "s16": s16, "s32": s32}

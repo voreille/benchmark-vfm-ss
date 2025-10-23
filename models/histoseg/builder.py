@@ -104,5 +104,4 @@ class Uni2Seg(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x = (x - self.pixel_mean) / self.pixel_std
-        output = self.model(x)
-        return output["main"]
+        return self.model(x)

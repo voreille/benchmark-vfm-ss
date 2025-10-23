@@ -20,7 +20,7 @@ model:
         tile: 448
         stride: 224           # overlap
         weighted_blend: false # or true, true will use Hanning windows to blend
-        pad_mode: "reflect"   # optional; nice for images
+        pad_mode: "constant"   # optional; nice for images
         pad_value: 0.0
 data:
   class_path: datasets.anorak.ANORAK

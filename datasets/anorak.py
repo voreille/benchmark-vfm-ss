@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 
 from datasets.anorak_dataset import Dataset
 from datasets.lightning_data_module import LightningDataModule
-from datasets.transforms import CustomTransforms
+from datasets.transforms import CustomTransforms, CustomTransformsVaryingSize
 
 
 class ANORAK(LightningDataModule):
@@ -25,6 +25,7 @@ class ANORAK(LightningDataModule):
         ignore_idx: int = 255,
         overwrite_root: str = None,
         prefetch_factor: int = 2,
+        lcm_align: int = 224,
     ) -> None:
         super().__init__(
             root=root,
@@ -50,8 +51,11 @@ class ANORAK(LightningDataModule):
         self.split_df = split_df[split_df["fold"] == fold]
 
         self.save_hyperparameters()
-        self.transforms = CustomTransforms(img_size=img_size,
-                                           scale_range=scale_range)
+        self.transforms = CustomTransformsVaryingSize(
+            img_size=img_size,
+            scale_range=scale_range,
+            lcm_align=lcm_align,
+        )
 
     def _get_split_ids(self):
         return (

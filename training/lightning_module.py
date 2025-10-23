@@ -40,6 +40,8 @@ class LightningModule(lightning.LightningModule):
 
         for param in self.network.encoder.parameters():
             param.requires_grad = not freeze_encoder
+        if freeze_encoder:
+            self.network.encoder.eval()
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
         self.tiler = tiler

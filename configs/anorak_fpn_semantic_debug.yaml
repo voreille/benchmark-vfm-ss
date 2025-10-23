@@ -16,12 +16,12 @@ model:
         tile: 448
         stride: 384 # overlap = 64
         weighted_blend: false # or true
-        pad_mode: "reflect" # optional; nice for images
+        pad_mode: "replicate" # optional; nice for images
         pad_value: 0.0
 data:
   class_path: datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK
+    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
     img_size: [448, 448]
     prefetch_factor: 4
     num_workers: 0
