@@ -1,10 +1,9 @@
-# models/histoseg/builder.py
-from typing import Dict, Tuple, Optional, Iterable, List
+# TODO: Rename it is not builder
+from typing import Dict, Optional, Iterable
 import torch
 import torch.nn as nn
-import timm
 
-from .encoder import ViTEncoderPyramidHooks
+from .encoder import ViTEncoderPyramidHooks, ResNetPyramidAdapter
 from .segfpn import SegFPN
 from .segmentation_model import SegModel
 
@@ -24,16 +23,17 @@ class Uni2Seg(nn.Module):
     """
 
     def __init__(
-        self,
-        num_classes: int = 7,
-        dropout: float = 0.2,
-        deep_supervision: bool = True,
-        img_skip_ch: int = 64,
-        extract_layers: Iterable[int] = (6, 12, 18, 24),
-        embed_dim: Optional[int] = None,  # auto if None
-        pyramid_channels: Optional[Dict[
-            str, int]] = None,  # {"s4":64,"s8":128,"s16":256,"s32":256}
+            self,
+            num_classes: int = 7,
+            dropout: float = 0.2,
+            deep_supervision: bool = True,
+            img_skip_ch: int = 64,
+            extract_layers: Iterable[int] = (6, 12, 18, 24),
+            embed_dim: Optional[int] = None,  # auto if None
+            pyramid_channels: Optional[Dict[
+                str, int]] = None,  # {"s4":64,"s8":128,"s16":256,"s32":256}
     ):
+        import timm
         super().__init__()
 
         self.save_hyperparameters = getattr(
@@ -101,6 +101,53 @@ class Uni2Seg(nn.Module):
         self.model = SegModel(encoder=encoder, decoder=decoder)
         # so the lightning module can find it and freeze if needed
         self.encoder = vit
+
+    def forward(self, x: torch.Tensor):
+        x = (x - self.pixel_mean) / self.pixel_std
+        return self.model(x)
+
+
+class Resnet50Seg(nn.Module):
+
+    def __init__(
+            self,
+            num_classes: int = 7,
+            dropout: float = 0.2,
+            deep_supervision: bool = True,
+            img_skip_ch: int = 64,
+            pyramid_channels: Optional[Dict[
+                str, int]] = None,  # {"s4":64,"s8":128,"s16":256,"s32":256}
+    ):
+        from torchvision.models import resnet50, ResNet50_Weights
+
+        super().__init__()
+
+        resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
+
+        if pyramid_channels is None:
+            pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
+
+        encoder = ResNetPyramidAdapter(
+            resnet=resnet,
+            pyramid_channels=pyramid_channels,
+        )
+        decoder = SegFPN(
+            num_classes=num_classes,
+            pyramid_channels=pyramid_channels,
+            img_skip_ch=img_skip_ch,
+            dropout=dropout,
+            deep_supervision=deep_supervision,
+            assert_shapes=True,
+        )
+        pixel_mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, -1, 1, 1)
+        pixel_std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, -1, 1, 1)
+
+        self.register_buffer("pixel_mean", pixel_mean)
+        self.register_buffer("pixel_std", pixel_std)
+        # 6) Compose, naming convention for the benchmark
+        self.model = SegModel(encoder=encoder, decoder=decoder)
+        # so the lightning module can find it and freeze if needed
+        self.encoder = resnet
 
     def forward(self, x: torch.Tensor):
         x = (x - self.pixel_mean) / self.pixel_std

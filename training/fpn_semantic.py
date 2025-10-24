@@ -56,10 +56,12 @@ class FPNSemantic(LightningModule):
         else:
             weights = None
 
-        self.criterion = CrossEntropyDiceLoss(class_weights=weights,
-                                              ignore_index=self.ignore_idx,
-                                              ce_weight=0.5,
-                                              dice_weight=0.5)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_idx,
+                                             weight=torch.tensor(weights) if weights is not None else None)
+        # self.criterion = CrossEntropyDiceLoss(class_weights=weights,
+        #                                       ignore_index=self.ignore_idx,
+        #                                       ce_weight=0.5,
+        #                                       dice_weight=0.5)
 
         self.init_metrics_semantic(num_classes, ignore_idx, num_metrics)
 
