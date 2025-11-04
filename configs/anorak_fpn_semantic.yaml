@@ -15,7 +15,7 @@ model:
       init_args:
         tile: 448
         stride: 384 # overlap = 64
-        weighted_blend: false # or true
+        weighted_blend: false # or true to use hanning window
         pad_mode: "replicate" 
         pad_value: 0.0
 data:
@@ -24,3 +24,4 @@ data:
     overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
     img_size: [448, 448]
     prefetch_factor: 4
+    fold: 0

@@ -5,6 +5,7 @@ import torch.nn as nn
 import wandb
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
+import numpy as np
 
 from training.lightning_module import LightningModule
 from training.tiler import Tiler
@@ -56,8 +57,9 @@ class FPNSemantic(LightningModule):
         else:
             weights = None
 
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_idx,
-                                             weight=torch.tensor(weights) if weights is not None else None)
+        self.criterion = nn.CrossEntropyLoss(
+            ignore_index=self.ignore_idx,
+            weight=torch.tensor(weights) if weights is not None else None)
         # self.criterion = CrossEntropyDiceLoss(class_weights=weights,
         #                                       ignore_index=self.ignore_idx,
         #                                       ce_weight=0.5,

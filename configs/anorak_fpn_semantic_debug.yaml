@@ -25,3 +25,4 @@ data:
     img_size: [448, 448]
     prefetch_factor: 4
     num_workers: 0
+    fold: 0

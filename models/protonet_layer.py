@@ -13,7 +13,7 @@ def _infer_device_from_encoder(encoder: torch.nn.Module) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class ProtoNet(torch.nn.Module):
+class ProtoNetLayer(torch.nn.Module):
     """
     Sklearn-like class for SimpleShot.
 
@@ -25,7 +25,6 @@ class ProtoNet(torch.nn.Module):
                  center_feats: bool = True,
                  normalize_feats: bool = True,
                  num_classes: int = 7,
-                 ignore_idx: int = -1,
                  patch_size: int = 14,
                  img_size: int = 224) -> None:
 
@@ -44,7 +43,6 @@ class ProtoNet(torch.nn.Module):
                              persistent=True)
 
         self.num_classes = num_classes
-        self.ignore_idx = ignore_idx
         self.patch_size = patch_size
         self.img_size = img_size
 
@@ -71,7 +69,7 @@ class ProtoNet(torch.nn.Module):
     def fit_mean(self, support_dataloader: torch.utils.data.DataLoader,
                  encoder: torch.nn.Module, device: torch.device) -> None:
 
-        running_sum = None
+        running_sum: torch.Tensor = torch.empty(0, device=device)
         D = None
         total = 0
 
@@ -80,7 +78,7 @@ class ProtoNet(torch.nn.Module):
             targets = self.to_per_pixel_targets_semantic(targets)
 
             for img, target in zip(imgs, targets):
-                crops = self.tile_image(img)
+                crops = self.tile_image(img, padding_value=0)
                 target_crops = self.tile_image(target)
                 n_crops = crops.shape[0]
                 target_crops = self.pool_target(
@@ -112,7 +110,7 @@ class ProtoNet(torch.nn.Module):
         device: torch.device,
     ) -> None:
 
-        running_sum = None
+        running_sum: Optional[torch.Tensor] = None
         total = 0
         D = self.mean_.shape[-1]
         for batch in tqdm(support_dataloader, desc="Fitting prototype"):
@@ -171,6 +169,7 @@ class ProtoNet(torch.nn.Module):
     def tile_image(
         self,
         img: torch.Tensor,
+        padding_value: int = 0,
     ) -> torch.Tensor:
         """
         img:     (C, H, W)
@@ -188,7 +187,7 @@ class ProtoNet(torch.nn.Module):
 
         # pad=(left, right, top, bottom) for 2D in F.pad
         if pad_h or pad_w:
-            img_b = pad(img_b, (0, pad_w, 0, pad_h), mode="constant", value=0)
+            img_b = pad(img_b, (0, pad_w, 0, pad_h), mode="constant", value=padding_value)
 
         img_tiles = (img_b.unfold(2, self.img_size, self.img_size).unfold(
             3, self.img_size,
