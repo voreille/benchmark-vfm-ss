@@ -9,7 +9,9 @@ model:
   init_args:
     freeze_encoder: True
     network:
-      class_path: models.histoseg.builder.Uni2Seg
+      class_path: models.histoseg.segmentation_models.HistoViTSeg
+      init_args:
+        encoder_id: "h-optimus-1"
     tiler:
       class_path: training.tiler.GridPadTiler
       init_args:

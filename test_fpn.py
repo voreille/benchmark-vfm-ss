@@ -7,7 +7,7 @@ from torch import nn, optim
 from tqdm import trange
 
 from datasets.anorak import ANORAK
-from models.histoseg.builder import Uni2Seg
+from models.histoseg.segmentation_models import HistoViTSeg
 
 
 def move_to_device(x, device):
@@ -83,7 +83,7 @@ def main():
                                    device), move_to_device(masks, device)
 
     # --- model ---
-    model = Uni2Seg(num_classes=7)  # your builder (nn.Module)
+    model = HistoViTSeg(num_classes=7)  # your builder (nn.Module)
 
     for param in model.encoder.parameters():
         param.requires_grad = False

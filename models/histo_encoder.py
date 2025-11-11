@@ -72,29 +72,14 @@ class Uni2EncoderSimple(nn.Module):
         return x
 
 
-class Uni2Encoder(nn.Module):
-
-    def __init__(
-        self,
-        encoder_name: str = "hf-hub:MahmoodLab/UNI2-h",
-        img_size: tuple[int, int] = (448, 448),
-        ckpt_path: str = "",
-        sub_norm: bool = False,
-        patch_size: int = 14,
-        pretrained: bool = True,
-    ):
-        super().__init__()
-
-        model_kwargs = {
-            "model_name": encoder_name,
-            "pretrained": pretrained,
-        }
-        if patch_size != 14:
-            raise ValueError("Uni2 only supports patch size of 14")
+def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
+    if encoder_id == "uni2":
 
         timm_kwargs = {
+            "model_name": "hf-hub:MahmoodLab/UNI2-h",
+            "pretrained": True,
             'img_size': 224,
-            'patch_size': patch_size,
+            'patch_size': 14,
             'depth': 24,
             'num_heads': 24,
             'init_values': 1e-5,
@@ -107,12 +92,49 @@ class Uni2Encoder(nn.Module):
             'reg_tokens': 8,
             'dynamic_img_size': True
         }
-        model_kwargs.update(timm_kwargs)
-        self.encoder = timm.create_model(**model_kwargs)
+        encoder = timm.create_model(**timm_kwargs)
 
-        pixel_mean = torch.tensor(self.encoder.default_cfg["mean"]).reshape(
+        embed_dim = 1536
+        patch_size = 14
+        pixel_mean = encoder.default_cfg["mean"]
+        pixel_std = encoder.default_cfg["std"]
+    elif encoder_id == "h-optimus-1":
+        encoder = timm.create_model("hf-hub:bioptimus/H-optimus-1",
+                                    pretrained=True,
+                                    init_values=1e-5,
+                                    dynamic_img_size=True)
+        embed_dim = 1536
+        patch_size = 14
+        pixel_mean = (0.707223, 0.578729, 0.703617),
+        pixel_std = (0.211883, 0.230117, 0.177517),
+    else:
+        raise ValueError(f"unknown encoder_id {encoder_id}")
+
+    return encoder, {
+        "embed_dim": embed_dim,
+        "patch_size": patch_size,
+        "pixel_mean": pixel_mean,
+        "pixel_std": pixel_std,
+    }
+
+
+class Encoder(nn.Module):
+
+    def __init__(
+        self,
+        encoder_id: str = "uni2",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+    ):
+        super().__init__()
+
+        self.encoder, encoder_meta = build_encoder(encoder_id)
+        patch_size = encoder_meta["patch_size"]
+
+        pixel_mean = torch.tensor(encoder_meta["pixel_mean"]).reshape(
             1, -1, 1, 1)
-        pixel_std = torch.tensor(self.encoder.default_cfg["std"]).reshape(
+        pixel_std = torch.tensor(encoder_meta["pixel_std"]).reshape(
             1, -1, 1, 1)
 
         self.register_buffer("pixel_mean", pixel_mean)
@@ -144,9 +166,10 @@ class Uni2Encoder(nn.Module):
             self.encoder.load_state_dict(torch.load(ckpt_path))
 
         if hasattr(self.encoder, "rope"):
-            self.encoder.rope = timm.create_model(img_size=img_size,
-                                                  patch_size=patch_size,
-                                                  **model_kwargs).rope
+            raise NotImplementedError("ROPE resizing not implemented")
+        #     self.encoder.rope = timm.create_model(img_size=img_size,
+        #                                           patch_size=patch_size,
+        #                                           **model_kwargs).rope
 
         if hasattr(self.encoder, "blocks"):
             for block in self.encoder.blocks:

@@ -1,25 +1,21 @@
-from models.histo_encoder import Uni2Encoder
+from models.histo_encoder import Encoder
 import torch.nn as nn
 import torch
 
 
-class LinearDecoder(Uni2Encoder):
+class LinearDecoder(Encoder):
     def __init__(
         self,
-        encoder_name,
+        encoder_id,
         num_classes,
         img_size,
         sub_norm=False,
-        patch_size=14,
-        pretrained=True,
         ckpt_path="",
     ):
         super().__init__(
-            encoder_name=encoder_name,
+            encoder_id=encoder_id,
             img_size=img_size,
             sub_norm=sub_norm,
-            patch_size=patch_size,
-            pretrained=pretrained,
             ckpt_path=ckpt_path,
         )
 

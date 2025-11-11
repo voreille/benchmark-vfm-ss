@@ -1,4 +1,5 @@
 trainer:
+  precision: "bf16-mixed" # or "bf16-mixed" for uni2
   max_steps: 40000
   val_check_interval: ~
   check_val_every_n_epoch: 10
@@ -9,14 +10,16 @@ model:
   init_args:
     freeze_encoder: True
     network:
-      class_path: models.histoseg.builder.Uni2Seg
+      class_path: models.histoseg.segmentation_models.HistoViTSeg
+      init_args:
+        encoder_id: "uni2"
     tiler:
       class_path: training.tiler.GridPadTiler
       init_args:
         tile: 448
         stride: 384 # overlap = 64
         weighted_blend: false # or true to use hanning window
-        pad_mode: "replicate" 
+        pad_mode: "replicate"
         pad_value: 0.0
 data:
   class_path: datasets.anorak.ANORAK
