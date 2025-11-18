@@ -48,8 +48,6 @@
                 "--root",
                 "data/",
                 "--no_compile",
-                "--data.num_workers",
-                "1"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",

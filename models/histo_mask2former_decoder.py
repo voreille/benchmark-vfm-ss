@@ -77,6 +77,7 @@ class Mask2formerDecoder(Encoder):
         q = self.q.weight
         q = q[:, None, :].repeat(1, x.shape[0], 1)
 
+
         v = x.transpose(0, 1)
 
         x = x.transpose(1, 2).reshape(x.shape[0], -1, *self.grid_size)
