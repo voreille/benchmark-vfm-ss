@@ -3,15 +3,15 @@ trainer:
   max_steps: 40000
   val_check_interval: ~
   check_val_every_n_epoch: 10
-  logger:
-    class_path: lightning.pytorch.loggers.wandb.WandbLogger
-    init_args:
-      project: debug_anorak
-      group: debug
-      job_type: debug
-      tags: ["debug", "local"]
-      save_dir: ./wandb_debug
-      log_model: false # avoid artifact uploads in debug
+  logger: ~
+    # class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    # init_args:
+    #   project: debug_anorak
+    #   group: debug
+    #   job_type: debug
+    #   tags: ["debug", "local"]
+    #   save_dir: ./wandb_debug
+    #   log_model: false # avoid artifact uploads in debug
   # callbacks:
   #   - class_path: lightning.pytorch.callbacks.ModelSummary
   #     init_args:
@@ -24,7 +24,7 @@ trainer:
 model:
   class_path: training.mask2former_semantic.Mask2formerSemantic
   init_args:
-    freeze_encoder: False
+    freeze_encoder: True
     network:
       class_path: models.histo_mask2former_decoder.Mask2formerDecoder
       # class_path: models.histoseg.segmentation_models.MocoResNetSeg

@@ -40,6 +40,7 @@ class Mask2formerSemantic(LightningModule):
             weight_decay=weight_decay,
             lr=lr,
             lr_multiplier_encoder=lr_multiplier_encoder,
+            tiler=tiler,
         )
 
         self.save_hyperparameters()
