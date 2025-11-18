@@ -59,6 +59,28 @@
             "justMyCode": false
         },
         {
+            "name": "Python: main.py fit ANORAK with AIGrading",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "args": [
+                "fit",
+                "-c",
+                "/home/valentin/workspaces/benchmark-vfm-ss/configs/anorak_aigrading_semantic_debug.yaml",
+                "--root",
+                "data/",
+                "--no_compile"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
             "name": "Python: main.py predict ANORAK with FPN",
             "type": "debugpy",
             "request": "launch",

@@ -275,6 +275,7 @@ class CustomTransformsVaryingSize(nn.Module):
             max_contrast_factor=0.5,
             saturation_factor=0.5,
             max_hue_delta=18,
+            disable_color_jitter: bool = False,
             lcm_align: int = 224,  # LCM(14, 32)
     ):
         super().__init__()
@@ -290,6 +291,8 @@ class CustomTransformsVaryingSize(nn.Module):
 
         self.random_horizontal_flip = T.RandomHorizontalFlip()
         self.random_crop_to_out = T.RandomCrop(self.img_size)
+
+        self.disable_color_jitter = disable_color_jitter
 
     # ---------- color jitter ----------
     def random_factor(self, factor: float, center: float = 1.0) -> float:
@@ -396,7 +399,9 @@ class CustomTransformsVaryingSize(nn.Module):
     # ---------- main ----------
     def forward(self, img: torch.Tensor, target: dict):
         # 1) color jitter
-        img = self.color_jitter(img)
+
+        if self.disable_color_jitter is False:
+            img = self.color_jitter(img)
 
         # 2) flip
         img, target = self.random_horizontal_flip(img, target)
@@ -428,3 +433,133 @@ class CustomTransformsVaryingSize(nn.Module):
 
         # No final forced crop — max size is img_size; smaller allowed
         return img, target
+
+
+class AIGradingTransforms(nn.Module):
+
+    def __init__(
+        self,
+        img_size: tuple[int, int],
+        scale_range: tuple[float, float],
+        max_brightness_delta=32,   # kept for API compatibility, not used now
+        max_contrast_factor=0.5,  # kept for API compatibility, not used now
+        saturation_factor=0.5,    # interpreted as +/- around 1.0
+        max_hue_delta=36,
+        rotation_range_deg: float = 90.0,
+        shift_range_frac: float = 0.2,
+    ):
+        """
+        PyTorch equivalent of the Keras ImageDataGenerator + random_adjust_saturation:
+
+        - Rotation up to ±rotation_range_deg
+        - Translation up to shift_range_frac * H/W
+        - Zoom via ScaleJitter(scale_range)
+        - Color jitter: random hue in [-max_hue_delta, max_hue_delta] degrees
+                        random saturation in [1 - saturation_factor, 1 + saturation_factor]
+        """
+        super().__init__()
+        from torchvision.transforms import InterpolationMode
+
+        self.img_size = img_size
+
+        # color jitter params, assuming img in [0,1]
+        self.max_saturation_factor = saturation_factor
+        self.max_hue_delta = max_hue_delta / 360.0  # TF uses hue in [−0.5,0.5]
+
+        self.random_horizontal_flip = T.RandomHorizontalFlip()
+
+        self.scale_range = scale_range
+        self.random_crop = T.RandomCrop(img_size)
+
+        # geometric: rotation + translation (zoom handled by ScaleJitter below)
+        self.random_affine = T.RandomAffine(
+            degrees=rotation_range_deg,
+            translate=(shift_range_frac, shift_range_frac),
+            scale=(1.0, 1.0),  # no extra zoom here, we use ScaleJitter
+            interpolation=InterpolationMode.BILINEAR,
+            fill=0,  # background for images; masks will get nearest + 0 fill
+        )
+
+    # -------------------- color jitter: TF-style random_adjust_saturation -----
+
+    def random_saturation_and_hue_tf(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        Rough equivalent of TF's random_adjust_saturation:
+
+            delta_hue ~ U[-max_delta_hue, max_delta_hue]
+            saturation_factor ~ U[min_sat, max_sat]
+
+        where:
+            max_delta_hue = self.max_hue_delta (in [-1,1])
+            min_sat = 1 - self.max_saturation_factor
+            max_sat = 1 + self.max_saturation_factor
+        """
+        # adjust hue
+        delta_hue = torch.empty(1).uniform_(
+            -self.max_hue_delta,
+            self.max_hue_delta,
+        ).item()
+        img = F.adjust_hue(img, delta_hue)
+
+        # adjust saturation
+        sat_min = max(0.0, 1.0 - self.max_saturation_factor)
+        sat_max = 1.0 + self.max_saturation_factor
+        saturation_factor = torch.empty(1).uniform_(sat_min, sat_max).item()
+        img = F.adjust_saturation(img, saturation_factor)
+
+        # clip back to [0,1] (TF clips after hue and saturation)
+        img = img.clamp(0.0, 1.0)
+
+        return img
+
+    # ------------------------------ pad & crop (unchanged) --------------------
+
+    def pad(self, img, target: dict):
+        pad_h = max(0, self.img_size[-2] - img.shape[-2])
+        pad_w = max(0, self.img_size[-1] - img.shape[-1])
+        padding = [0, 0, pad_w, pad_h]
+
+        img = F.pad(img, padding)
+        target["masks"] = F.pad(target["masks"], padding)
+
+        return img, target
+
+    def crop(self, img, target: dict):
+        img_crop, target_crop = self.random_crop(img, target)
+
+        mask_sums = target_crop["masks"].sum(dim=[-2, -1])
+        non_empty_mask = mask_sums > 0
+
+        if non_empty_mask.sum() == 0:
+            # recurse until we get a crop with at least one positive mask
+            return self.crop(img, target)
+
+        target_crop["masks"] = target_crop["masks"][non_empty_mask]
+        target_crop["labels"] = target_crop["labels"][non_empty_mask]
+
+        return img_crop, target_crop
+
+    # -------------------------------- forward ---------------------------------
+
+    def forward(self, img, target: dict):
+        # img: (C,H,W), float in [0,1]
+        # target: {"masks": (Q,H,W), "labels": (Q,)}
+
+        img = self.random_saturation_and_hue_tf(img)
+
+        img, target = self.random_horizontal_flip(img, target)
+
+
+        c, h, w = img.shape
+        target_size = max(h, w)
+        img, target = T.ScaleJitter(
+            target_size=(target_size, target_size),
+            scale_range=self.scale_range,
+            antialias=True,
+        )(img, target)
+
+        img, target = self.pad(img, target)
+
+        img, target = self.random_affine(img, target)
+
+        return self.crop(img, target)

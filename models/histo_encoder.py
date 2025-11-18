@@ -98,6 +98,7 @@ def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
         patch_size = 14
         pixel_mean = encoder.default_cfg["mean"]
         pixel_std = encoder.default_cfg["std"]
+        n_blocks = len(encoder.blocks)
     elif encoder_id == "h-optimus-1":
         encoder = timm.create_model("hf-hub:bioptimus/H-optimus-1",
                                     pretrained=True,
@@ -107,6 +108,22 @@ def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
         patch_size = 14
         pixel_mean = (0.707223, 0.578729, 0.703617),
         pixel_std = (0.211883, 0.230117, 0.177517),
+        n_blocks = len(encoder.blocks)
+    elif encoder_id == "h0-mini":
+        
+        encoder = timm.create_model(
+            "hf-hub:bioptimus/H0-mini",
+            pretrained=True,
+            mlp_layer=timm.layers.SwiGLUPacked,
+            act_layer=torch.nn.SiLU,
+            dynamic_img_size=True,  # keep this so your hooks work on 448
+        )
+        embed_dim = getattr(encoder, "embed_dim", 768)
+        patch_size = 14
+        pixel_mean = encoder.default_cfg[
+            "mean"]  # I checked these are the same as h-optimus-1
+        pixel_std = encoder.default_cfg["std"]
+        n_blocks = len(encoder.blocks)
     else:
         raise ValueError(f"unknown encoder_id {encoder_id}")
 
@@ -115,6 +132,7 @@ def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
         "patch_size": patch_size,
         "pixel_mean": pixel_mean,
         "pixel_std": pixel_std,
+        "n_blocks": n_blocks,
     }
 
 

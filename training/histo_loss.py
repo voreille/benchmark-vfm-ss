@@ -21,6 +21,36 @@ def _mask_valid(logits, targets, ignore_idx):
 class CrossEntropyDiceLoss(nn.Module):
 
     def __init__(self,
+                 weight=None,
+                 ignore_index=255,
+                 ce_w=0.5,
+                 dice_w=0.5,
+                 smooth=1.0):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index)
+        self.ce_w, self.dice_w, self.smooth = ce_w, dice_w, smooth
+        self.ignore_index = ignore_index
+
+    def forward(self, logits, target):
+        ce = self.ce(logits, target)
+        # dice over non-ignore pixels
+        C = logits.shape[1]
+        mask = (target != self.ignore_index)
+        probs = torch.softmax(logits, dim=1)
+        probs = probs * mask.unsqueeze(1)
+        target_oh = torch.zeros_like(probs).scatter_(
+            1,
+            target.clamp_min(0).unsqueeze(1), 1)
+        target_oh = target_oh * mask.unsqueeze(1)
+        num = 2 * (probs * target_oh).sum(dim=(0, 2, 3)) + self.smooth
+        den = (probs + target_oh).sum(dim=(0, 2, 3)) + self.smooth
+        dice = 1 - (num / den).mean()
+        return self.ce_w * ce + self.dice_w * dice
+
+
+class CrossEntropyDiceLossOld(nn.Module):
+
+    def __init__(self,
                  class_weights=None,
                  ignore_index=-1,
                  dice_weight=0.5,

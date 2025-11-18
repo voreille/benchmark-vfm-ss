@@ -51,9 +51,9 @@ class HistoViTSeg(nn.Module):
             pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
 
         # 4) Encoder adapter (hooks)
+
         self.encoder_adapter = ViTEncoderPyramidHooks(
             vit=vit,
-            extract_layers=extract_layers,
             pyramid_channels=pyramid_channels,
             embed_dim=vit_meta["embed_dim"],
         )
@@ -72,6 +72,11 @@ class HistoViTSeg(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x = (x - self.pixel_mean) / self.pixel_std
+
+        ps = int(self.encoder.patch_embed.patch_size[0])
+        H, W = x.shape[-2:]
+        assert H % ps == 0 and W % ps == 0, f"Input size ({H},{W}) not divisible by patch size {ps}"
+
         features = self.encoder_adapter(x)
         return self.decoder(x, features)
 
@@ -92,6 +97,60 @@ class Resnet50Seg(nn.Module):
         super().__init__()
 
         resnet = resnet50(weights=ResNet50_Weights.DEFAULT)
+
+        if pyramid_channels is None:
+            pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
+
+        self.encoder_adapter = ResNetPyramidAdapter(
+            resnet=resnet,
+            pyramid_channels=pyramid_channels,
+        )
+        self.decoder = SegFPN(
+            num_classes=num_classes,
+            pyramid_channels=pyramid_channels,
+            img_skip_ch=img_skip_ch,
+            dropout=dropout,
+            deep_supervision=deep_supervision,
+            assert_shapes=True,
+        )
+        pixel_mean = torch.tensor([0.485, 0.456, 0.406]).reshape(1, -1, 1, 1)
+        pixel_std = torch.tensor([0.229, 0.224, 0.225]).reshape(1, -1, 1, 1)
+
+        self.register_buffer("pixel_mean", pixel_mean)
+        self.register_buffer("pixel_std", pixel_std)
+
+        self.encoder = resnet
+
+    def forward(self, x: torch.Tensor):
+        x = (x - self.pixel_mean) / self.pixel_std
+        features = self.encoder_adapter(x)
+        return self.decoder(x, features)
+
+
+class MocoResNetSeg(nn.Module):
+
+    def __init__(
+            self,
+            checkpoint_path: str,
+            base_encoder: str = "resnet101",
+            num_classes: int = 7,
+            dropout: float = 0.2,
+            deep_supervision: bool = True,
+            img_skip_ch: int = 64,
+            pyramid_channels: Optional[Dict[
+                str, int]] = None,  # {"s4":64,"s8":128,"s16":256,"s32":256}
+    ):
+
+        from .resnet_builder import load_moco_resnet_embedding
+        super().__init__()
+
+        resnet_wrap = load_moco_resnet_embedding(
+            checkpoint_path=checkpoint_path,
+            device="cpu",
+            base_encoder=base_encoder,
+            verbose=True,
+        )
+        resnet = resnet_wrap.backbone
 
         if pyramid_channels is None:
             pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}

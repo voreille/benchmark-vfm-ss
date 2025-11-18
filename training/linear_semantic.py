@@ -2,13 +2,13 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import wandb
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
 
+import wandb
+from training.histo_loss import CrossEntropyDiceLoss
 from training.lightning_module import LightningModule
 from training.tiler import Tiler
-from training.histo_loss import CrossEntropyDiceLoss
 
 
 class LinearSemantic(LightningModule):

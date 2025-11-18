@@ -1,8 +1,9 @@
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 
 import pandas as pd
 from torch.utils.data import DataLoader
+from torch import nn
 
 from datasets.anorak_dataset import Dataset, PredictDataset
 from datasets.lightning_data_module import LightningDataModule
@@ -11,22 +12,21 @@ from datasets.transforms import CustomTransforms, CustomTransformsVaryingSize
 
 class ANORAK(LightningDataModule):
 
-    def __init__(
-        self,
-        root,
-        devices,
-        num_workers: int = 0,
-        fold: int = 0,
-        img_size: tuple[int, int] = (448, 448),
-        batch_size: int = 1,
-        num_classes: int = 7,
-        num_metrics: int = 1,
-        scale_range=(0.8, 1.2),
-        ignore_idx: int = 255,
-        overwrite_root: str = None,
-        prefetch_factor: int = 2,
-        lcm_align: int = 224,
-    ) -> None:
+    def __init__(self,
+                 root,
+                 devices,
+                 num_workers: int = 0,
+                 fold: int = 0,
+                 img_size: tuple[int, int] = (448, 448),
+                 batch_size: int = 1,
+                 num_classes: int = 7,
+                 num_metrics: int = 1,
+                 scale_range=(0.8, 1.2),
+                 ignore_idx: int = 255,
+                 overwrite_root: str = None,
+                 prefetch_factor: int = 2,
+                 lcm_align: int = 224,
+                 transforms: Optional[nn.Module] = None) -> None:
         super().__init__(
             root=root,
             devices=devices,
@@ -51,11 +51,14 @@ class ANORAK(LightningDataModule):
         self.split_df = split_df[split_df["fold"] == fold]
 
         self.save_hyperparameters()
-        self.transforms = CustomTransformsVaryingSize(
-            img_size=img_size,
-            scale_range=scale_range,
-            lcm_align=lcm_align,
-        )
+        if transforms is not None:
+            self.transforms = transforms
+        else:
+            self.transforms = CustomTransformsVaryingSize(
+                img_size=img_size,
+                scale_range=scale_range,
+                lcm_align=lcm_align,
+            )
 
     def _get_split_ids(self):
         return (

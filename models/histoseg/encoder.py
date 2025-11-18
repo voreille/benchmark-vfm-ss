@@ -9,7 +9,7 @@ from timm.layers import (
     resample_abs_pos_embed_nhwc,
     resample_patch_embed,
 )
-from torchvision.models import ResNet50_Weights, resnet50
+from torch.nn.utils import weight_norm as wn
 
 
 class ViTEncoderPyramid(
@@ -244,7 +244,7 @@ class ViTEncoderPyramidHooks(nn.Module):
     def __init__(
             self,
             vit: nn.Module,
-            extract_layers: Iterable[int] = (6, 12, 18, 24),  # 1-based indices
+            extract_layers: Optional[Iterable[int]] = None,  # 1-based indices
             has_cls: bool = True,
             embed_dim: Optional[
                 int] = None,  # auto if None: vit.embed_dim or vit.num_features
@@ -255,6 +255,11 @@ class ViTEncoderPyramidHooks(nn.Module):
         super().__init__()
 
         self.vit = vit
+        if extract_layers is None:
+            last_layer = len(getattr(vit, "blocks", []))
+            extract_layers = (last_layer // 4, last_layer // 2,
+                              3 * last_layer // 4, last_layer)
+
         self.layers = tuple(extract_layers)
         self.has_cls = has_cls
 
@@ -347,35 +352,26 @@ class ViTEncoderPyramidHooks(nn.Module):
         fmap = spatial.transpose(1, 2).reshape(B, D, Ht, Wt)
         return fmap
 
-    # ----- forward -----
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Run the ViT once, grab chosen layers via hooks, and build the pyramid.
-        """
         self._stash.clear()
-
         B, _, H, W = x.shape
         Ht, Wt = H // self.patch_size[0], W // self.patch_size[1]
 
-        # Run model (timm ViTs expose forward_features; fallback to forward)
         if hasattr(self.vit, "forward_features"):
             _ = self.vit.forward_features(x)
         else:
             _ = self.vit(x)
 
-        # Collect in the order of extract_layers
-        captured: List[torch.Tensor] = []
+        captured = []
         for idx in self.layers:
-            t = self._stash.get(idx - 1, None)
+            t = self._stash.get(idx - 1)
             if t is None:
                 raise RuntimeError(
                     f"Hook for block {idx} didn't capture output.")
             captured.append(t)
-
         if len(captured) != 4:
             raise RuntimeError(
-                f"Expected 4 layers, got {len(captured)}. Got indices: {self.layers}"
-            )
+                f"Expected 4 layers, got {len(captured)}. Got {self.layers}")
 
         assign = {
             "s4": captured[0],
@@ -383,17 +379,22 @@ class ViTEncoderPyramidHooks(nn.Module):
             "s16": captured[2],
             "s32": captured[3]
         }
-        target = {
-            "s4": (H // 4, W // 4),
-            "s8": (H // 8, W // 8),
-            "s16": (H // 16, W // 16),
-            "s32": (H // 32, W // 32)
-        }
 
-        out: Dict[str, torch.Tensor] = {}
+        # target sizes from token grid (exact)
+        target = {
+            "s32":
+            (Ht,
+             Wt),  # 1/32 of image for ps=16; for ps=14 this equals token grid
+            "s16": (Ht * 2, Wt * 2),
+            "s8": (Ht * 4, Wt * 4),
+            "s4": (Ht * 8, Wt * 8),
+        }
+        # (for 448×448 with ps=14: Ht=32 → s4=256, s8=128, s16=64, s32=32 tokens → after proj resize to 112,56,28,14 exactly)
+
+        out = {}
         for k, tok in assign.items():
-            fmap = self._tokens_to_map(tok, Ht, Wt)  # [B, D, Ht, Wt] inferred
-            fmap = self.proj[k](fmap)  # D -> C_k (per scale)
+            fmap = self._tokens_to_map(tok, Ht, Wt)  # [B, D, Ht, Wt]
+            fmap = self.proj[k](fmap)  # D -> C_k
             out[k] = F.interpolate(fmap,
                                    size=target[k],
                                    mode="bilinear",
@@ -464,5 +465,130 @@ class ResNetPyramidAdapter(nn.Module):
         s8 = self.proj["s8"](c3)
         s16 = self.proj["s16"](c4)
         s32 = self.proj["s32"](c5)
+
+        return {"s4": s4, "s8": s8, "s16": s16, "s32": s32}
+
+def convify_trunk(linear_trunk: nn.Sequential) -> nn.Sequential:
+    conv_layers = []
+    for m in linear_trunk:
+        if isinstance(m, nn.Linear):
+            # Check if weight_norm is used on this Linear
+            uses_wn = hasattr(m, 'weight_g') and hasattr(m, 'weight_v')
+            conv = nn.Conv2d(
+                in_channels=m.in_features,
+                out_channels=m.out_features,
+                kernel_size=1,
+                bias=(m.bias is not None),
+            )
+            if uses_wn:
+                conv = wn(conv)  # reparameterize conv.weight -> (weight_g, weight_v)
+
+            with torch.no_grad():
+                # copy weights (note: for weight_norm, assign to .weight_v / .weight_g)
+                if uses_wn:
+                    conv.weight_v.copy_(m.weight_v.view(m.out_features, m.in_features, 1, 1))
+                    conv.weight_g.copy_(m.weight_g)
+                else:
+                    conv.weight.copy_(m.weight.view(m.out_features, m.in_features, 1, 1))
+                    if m.bias is not None:
+                        conv.bias.copy_(m.bias)
+                if (not uses_wn) and m.bias is not None:
+                    conv.bias.copy_(m.bias)
+
+            conv_layers.append(conv)
+
+        elif isinstance(m, nn.BatchNorm1d):
+            bn = nn.BatchNorm2d(
+                num_features=m.num_features,
+                eps=m.eps,
+                momentum=m.momentum,
+                affine=m.affine,
+                track_running_stats=m.track_running_stats
+            )
+            with torch.no_grad():
+                if m.affine:
+                    bn.weight.copy_(m.weight)
+                    bn.bias.copy_(m.bias)
+                bn.running_mean.copy_(m.running_mean)
+                bn.running_var.copy_(m.running_var)
+                if hasattr(m, "num_batches_tracked"):
+                    bn.num_batches_tracked.copy_(m.num_batches_tracked)
+            conv_layers.append(bn)
+
+        elif isinstance(m, nn.ReLU):
+            conv_layers.append(nn.ReLU(inplace=m.inplace))
+        elif isinstance(m, nn.Identity):
+            conv_layers.append(nn.Identity())
+        else:
+            raise TypeError(f"Unsupported trunk layer type: {type(m)}")
+    return nn.Sequential(*conv_layers)
+
+
+class MocoResNetPyramidAdapter(nn.Module):
+    """
+    Adapter for a MoCo ResNet wrapper (with .backbone and optional .trunk).
+
+    forward(x) -> dict:
+        "s4":  [B, C4,  H/4,  W/4]   (from layer1)
+        "s8":  [B, C8,  H/8,  W/8]   (from layer2)
+        "s16": [B, C16, H/16, W/16]  (from layer3)
+        "s32": [B, C32, H/32, W/32]  (from layer4, optionally passed through convified trunk)
+
+    Notes:
+      - ResNet stem: conv1->bn1->relu->maxpool => /4.
+      - Pre-trunk channels: {s4:256, s8:512, s16:1024, s32:2048}.
+      - If trunk exists (2048->1024 via 1x1 conv stack), we set s32 input to 1024.
+    """
+    def __init__(
+        self,
+        resnet_wrapper: nn.Module,                          # expects .backbone (tv ResNet) and optional .trunk (MLP)
+        pyramid_channels: Optional[Dict[str, int]] = None,
+    ):
+        super().__init__()
+        assert hasattr(resnet_wrapper, "backbone"), "Expected wrapper with .backbone"
+        self.backbone: nn.Module = resnet_wrapper.backbone
+
+        # Optional trunk
+        self.trunk: Optional[nn.Sequential] = None
+        if hasattr(resnet_wrapper, "trunk") and isinstance(resnet_wrapper.trunk, nn.Sequential):
+            self.trunk = convify_trunk(resnet_wrapper.trunk)  # 2048 -> 1024 (spatial 1x1 conv stack)
+
+        if pyramid_channels is None:
+            pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
+        self.pyramid_channels = dict(pyramid_channels)
+
+        # Determine s32 input channels depending on trunk presence
+        s32_in = 1024 if self.trunk is not None else 2048
+        in_ch = {"s4": 256, "s8": 512, "s16": 1024, "s32": s32_in}
+
+        self.proj = nn.ModuleDict({
+            k: nn.Conv2d(in_ch[k], self.pyramid_channels[k], kernel_size=1, bias=False)
+            for k in ("s4", "s8", "s16", "s32")
+        })
+
+    def _forward_stem(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.backbone.conv1(x)
+        x = self.backbone.bn1(x)
+        x = self.backbone.relu(x)
+        x = self.backbone.maxpool(x)  # /4
+        return x
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        # stem (/4)
+        c1 = self._forward_stem(x)
+        # stages
+        c2 = self.backbone.layer1(c1)  # /4   (256 ch)
+        c3 = self.backbone.layer2(c2)  # /8   (512 ch)
+        c4 = self.backbone.layer3(c3)  # /16  (1024 ch)
+        c5 = self.backbone.layer4(c4)  # /32  (2048 ch)
+
+        if self.trunk is not None:
+            c5 = self.trunk(c5)        # 2048 -> 1024 (spatial 1x1 convs)
+
+        # project to decoder channels
+        s4  = self.proj["s4"](c2)
+        s8  = self.proj["s8"](c3)
+        s16 = self.proj["s16"](c4)
+        s32 = self.proj["s32"](c5)     # now expects 1024 if trunk exists, else 2048
 
         return {"s4": s4, "s8": s8, "s16": s16, "s32": s32}

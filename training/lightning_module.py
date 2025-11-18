@@ -38,10 +38,15 @@ class LightningModule(lightning.LightningModule):
         self.weight_decay = weight_decay
         self.lr_multiplier_encoder = lr_multiplier_encoder
 
-        for param in self.network.encoder.parameters():
-            param.requires_grad = not freeze_encoder
-        if freeze_encoder:
+        if hasattr(self.network, "encoder") and freeze_encoder:
+            for param in self.network.encoder.parameters():
+                param.requires_grad = False
+
             self.network.encoder.eval()
+        elif freeze_encoder:
+            raise ValueError(
+                "Cannot freeze encoder: the network has no attribute 'encoder'."
+            )
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
         self.tiler = tiler
@@ -110,18 +115,15 @@ class LightningModule(lightning.LightningModule):
                      sync_dist=True)
 
     def configure_optimizers(self):
-        encoder_param_names = {
-            name
-            for name, _ in self.network.encoder.named_parameters()
-        }
-        base_params = []
-        encoder_params = []
 
-        for name, param in self.named_parameters():
-            if name.replace("network.encoder.", "") in encoder_param_names:
-                encoder_params.append(param)
-            else:
-                base_params.append(param)
+        if hasattr(self.network, "encoder"):
+            enc_params = list(self.network.encoder.parameters())
+        else:
+            enc_params = []
+
+        enc_ids = {id(p) for p in enc_params}
+
+        base_params = [p for p in self.parameters() if id(p) not in enc_ids]
 
         return AdamW(
             [
@@ -130,7 +132,7 @@ class LightningModule(lightning.LightningModule):
                     "lr": self.lr
                 },
                 {
-                    "params": encoder_params,
+                    "params": enc_params,
                     "lr": self.lr * self.lr_multiplier_encoder,
                 },
             ],
@@ -310,7 +312,11 @@ class LightningModule(lightning.LightningModule):
         split = self.trainer.datamodule.predict_splits[dataloader_idx]
         imgs, targets, img_ids = batch
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
-        crop_logits = self(crops)["main"]
+        crop_logits = self(crops)
+
+        if isinstance(crop_logits, dict):
+            crop_logits = crop_logits["main"]
+
         logits = self.revert_window_logits_semantic(
             crop_logits, origins, img_sizes)  # list of (C,H,W)
         # per-pixel targets

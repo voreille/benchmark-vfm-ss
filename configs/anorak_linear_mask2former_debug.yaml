@@ -22,12 +22,11 @@ trainer:
     #     freq_epochs: 50 # every N epochs (set to 5 if it’s too chatty)
 
 model:
-  class_path: training.fpn_semantic.FPNSemantic
+  class_path: training.mask2former_semantic.Mask2formerSemantic
   init_args:
     freeze_encoder: False
-    deep_supervision: False
     network:
-      class_path: models.histoseg.segmentation_models.HistoViTSeg
+      class_path: models.histo_mask2former_decoder.Mask2formerDecoder
       # class_path: models.histoseg.segmentation_models.MocoResNetSeg
       init_args:
         encoder_id: "h0-mini"

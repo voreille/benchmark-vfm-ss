@@ -75,16 +75,24 @@ class FPNSemantic(LightningModule):
         targets = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
         targets = torch.stack(targets).long()
 
-        loss_total = self.criterion(
-            output["main"],
-            targets,
-        ) * self.deep_supervision_weights.get("main", 1.0) + self.criterion(
-            output.get("aux8"),
-            targets,
-        ) * self.deep_supervision_weights.get("aux8", 0.0) + self.criterion(
-            output.get("aux16"),
-            targets,
-        ) * self.deep_supervision_weights.get("aux16", 0.0)
+        if self.deep_supervision:
+            loss_total = self.criterion(
+                output["main"],
+                targets,
+            ) * self.deep_supervision_weights.get(
+                "main", 1.0) + self.criterion(
+                    output.get("aux8"),
+                    targets,
+                ) * self.deep_supervision_weights.get(
+                    "aux8", 0.0) + self.criterion(
+                        output.get("aux16"),
+                        targets,
+                    ) * self.deep_supervision_weights.get("aux16", 0.0)
+        else:
+            loss_total = self.criterion(
+                output["main"],
+                targets,
+            )
 
         self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
 
