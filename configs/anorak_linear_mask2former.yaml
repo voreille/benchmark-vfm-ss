@@ -2,7 +2,8 @@ trainer:
   precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
   val_check_interval: ~
-  check_val_every_n_epoch: 10
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
@@ -24,7 +25,7 @@ trainer:
 model:
   class_path: training.mask2former_semantic.Mask2formerSemantic
   init_args:
-    freeze_encoder: True
+    freeze_encoder: False
     network:
       class_path: models.histo_mask2former_decoder.Mask2formerDecoder
       init_args:
@@ -44,7 +45,9 @@ data:
     img_size: [672, 672]
     prefetch_factor: 4
     num_workers: 0
+    batch_size: 16
     fold: 0
+    epoch_repeat: 30
     transforms:
       class_path: datasets.transforms.CustomTransforms
       init_args:

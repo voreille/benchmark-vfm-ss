@@ -8,25 +8,29 @@ from torch import nn
 from datasets.anorak_dataset import Dataset, PredictDataset
 from datasets.lightning_data_module import LightningDataModule
 from datasets.transforms import CustomTransforms, CustomTransformsVaryingSize
+from datasets.utils import RepeatDataset
 
 
 class ANORAK(LightningDataModule):
-
-    def __init__(self,
-                 root,
-                 devices,
-                 num_workers: int = 0,
-                 fold: int = 0,
-                 img_size: tuple[int, int] = (448, 448),
-                 batch_size: int = 1,
-                 num_classes: int = 7,
-                 num_metrics: int = 1,
-                 scale_range=(0.8, 1.2),
-                 ignore_idx: int = 255,
-                 overwrite_root: str = None,
-                 prefetch_factor: int = 2,
-                 lcm_align: int = 224,
-                 transforms: Optional[nn.Module] = None) -> None:
+    def __init__(
+        self,
+        root,
+        devices,
+        num_workers: int = 0,
+        fold: int = 0,
+        img_size: tuple[int, int] = (448, 448),
+        batch_size: int = 1,
+        num_classes: int = 7,
+        num_metrics: int = 1,
+        scale_range=(0.8, 1.2),
+        ignore_idx: int = 255,
+        overwrite_root: str = None,
+        prefetch_factor: int = 2,
+        lcm_align: int = 224,
+        transforms: Optional[nn.Module] = None,
+        epoch_repeat: int = 1,
+        model_type: str = "mask2former",
+    ) -> None:
         super().__init__(
             root=root,
             devices=devices,
@@ -50,7 +54,9 @@ class ANORAK(LightningDataModule):
         split_df = pd.read_csv(root_dir / "split_df.csv")
         self.split_df = split_df[split_df["fold"] == fold]
 
-        self.save_hyperparameters()
+        self.epoch_repeat = epoch_repeat
+
+        self.save_hyperparameters(ignore=["transforms"])
         if transforms is not None:
             self.transforms = transforms
         else:
@@ -62,16 +68,14 @@ class ANORAK(LightningDataModule):
 
     def _get_split_ids(self):
         return (
-            self.split_df[
-                self.split_df["is_train"]]["image_id"].unique().tolist(),
-            self.split_df[
-                self.split_df["is_val"]]["image_id"].unique().tolist(),
-            self.split_df[self.split_df["is_test"]]
-            ["image_id"].unique().tolist(),
+            self.split_df[self.split_df["is_train"]]["image_id"].unique().tolist(),
+            self.split_df[self.split_df["is_val"]]["image_id"].unique().tolist(),
+            self.split_df[self.split_df["is_test"]]["image_id"].unique().tolist(),
         )
 
     def compute_class_weights(self):
         from datasets.stats import compute_class_weights_from_ids
+
         train_ids, _, _ = self._get_split_ids()
         return compute_class_weights_from_ids(
             train_ids,
@@ -84,31 +88,31 @@ class ANORAK(LightningDataModule):
         train_ids, val_ids, test_ids = self._get_split_ids()
 
         if stage in ("fit", "validate", None):
-            self.train_dataset = Dataset(train_ids,
-                                         self.images_dir,
-                                         self.masks_dir,
-                                         transforms=self.transforms)
-            self.val_dataset = Dataset(val_ids, self.images_dir,
-                                       self.masks_dir)
+            self.train_dataset = Dataset(
+                train_ids, self.images_dir, self.masks_dir, transforms=self.transforms
+            )
+            self.val_dataset = Dataset(val_ids, self.images_dir, self.masks_dir)
 
             # compute once per fold for training
             self.class_weights = self.compute_class_weights()
 
         if stage in ("test", None):
-            self.test_dataset = Dataset(test_ids, self.images_dir,
-                                        self.masks_dir)
+            self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
 
         if stage in ("predict", None):
-            self.val_dataset = PredictDataset(val_ids, self.images_dir,
-                                              self.masks_dir)
-            self.test_dataset = PredictDataset(test_ids, self.images_dir,
-                                               self.masks_dir)
+            self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
+            self.test_dataset = PredictDataset(
+                test_ids, self.images_dir, self.masks_dir
+            )
 
         return self
 
     def train_dataloader(self):
+        dataset = self.train_dataset
+        if getattr(self, "epoch_repeat", 1) > 1:
+            dataset = RepeatDataset(dataset, repeats=self.epoch_repeat)
         return DataLoader(
-            self.train_dataset,
+            dataset,
             shuffle=True,
             drop_last=True,
             collate_fn=self.train_collate,
@@ -131,8 +135,7 @@ class ANORAK(LightningDataModule):
 
     def predict_dataloader(self):
         # make sure datasets exist
-        if not hasattr(self, "val_dataset") or not hasattr(
-                self, "test_dataset"):
+        if not hasattr(self, "val_dataset") or not hasattr(self, "test_dataset"):
             self.setup(stage="predict")
 
         loaders, splits = [], []
@@ -151,7 +154,6 @@ class ANORAK(LightningDataModule):
 
 
 class ANORAKFewShot(LightningDataModule):
-
     def __init__(
         self,
         root,
@@ -193,16 +195,14 @@ class ANORAKFewShot(LightningDataModule):
 
     def _get_split_ids(self):
         return (
-            self.split_df[
-                self.split_df["is_train"]]["image_id"].unique().tolist(),
-            self.split_df[
-                self.split_df["is_val"]]["image_id"].unique().tolist(),
-            self.split_df[self.split_df["is_test"]]
-            ["image_id"].unique().tolist(),
+            self.split_df[self.split_df["is_train"]]["image_id"].unique().tolist(),
+            self.split_df[self.split_df["is_val"]]["image_id"].unique().tolist(),
+            self.split_df[self.split_df["is_test"]]["image_id"].unique().tolist(),
         )
 
     def compute_class_weights(self):
         from datasets.stats import compute_class_weights_from_ids
+
         train_ids, _, _ = self._get_split_ids()
         return compute_class_weights_from_ids(
             train_ids,
@@ -215,24 +215,21 @@ class ANORAKFewShot(LightningDataModule):
         train_ids, val_ids, test_ids = self._get_split_ids()
 
         if stage in ("fit", "validate", None):
-            self.train_dataset = Dataset(train_ids, self.images_dir,
-                                         self.masks_dir)
+            self.train_dataset = Dataset(train_ids, self.images_dir, self.masks_dir)
 
-            self.val_dataset = Dataset(val_ids, self.images_dir,
-                                       self.masks_dir)
+            self.val_dataset = Dataset(val_ids, self.images_dir, self.masks_dir)
 
             # compute once per fold for training
             self.class_weights = self.compute_class_weights()
 
         if stage in ("test", None):
-            self.test_dataset = Dataset(test_ids, self.images_dir,
-                                        self.masks_dir)
+            self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
 
         if stage in ("predict", None):
-            self.val_dataset = PredictDataset(val_ids, self.images_dir,
-                                              self.masks_dir)
-            self.test_dataset = PredictDataset(test_ids, self.images_dir,
-                                               self.masks_dir)
+            self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
+            self.test_dataset = PredictDataset(
+                test_ids, self.images_dir, self.masks_dir
+            )
 
         return self
 
@@ -261,8 +258,7 @@ class ANORAKFewShot(LightningDataModule):
 
     def predict_dataloader(self):
         # make sure datasets exist
-        if not hasattr(self, "val_dataset") or not hasattr(
-                self, "test_dataset"):
+        if not hasattr(self, "val_dataset") or not hasattr(self, "test_dataset"):
             self.setup(stage="predict")
 
         loaders, splits = [], []

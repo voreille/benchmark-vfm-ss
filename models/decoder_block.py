@@ -35,9 +35,12 @@ class DecoderBlock(nn.Module):
         q_pos_embeds: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
         if mask is not None:
-            mask = mask[:, None, ...].repeat(1, self.cross_attn.num_heads, 1, 1)
-            mask = mask.flatten(0, 1)
+            # mask: (B, Q, HW)
+            B, Q, HW = mask.shape
+            mask = mask.unsqueeze(1).expand(B, self.cross_attn.num_heads, Q, HW)
+            mask = mask.reshape(B * self.cross_attn.num_heads, Q, HW)
 
         residual = q
         q, _ = self.cross_attn(

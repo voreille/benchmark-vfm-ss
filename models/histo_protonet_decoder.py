@@ -3,304 +3,241 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.functional import normalize, one_hot, pad
 
 from models.histo_encoder import Encoder
 
 
-@torch.no_grad()
-def masks_to_token_soft_from_semantic(
-        targets_sem: torch.Tensor,  # [B,1,H,W] or [B,H,W] (long)
-        num_classes: int,  # C (includes background, e.g., bg=0)
-        grid_size: Tuple[int, int],  # (Ht, Wt)
-        ignore_idx: int = 255,
-        purity_thresh: float
-    | None = 0.9,  # set None to disable purity filtering
-        bg_idx: int = 0,  # background class id in [0..C-1]
-        renorm_exclude_ignore:
-    bool = True,  # renormalize class probs over non-ignore
-        drop_background_only: bool = True,  # drop tokens with only background
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-      y_soft: [B, Q, C]  pooled class fractions (over real classes 0..C-1)
-      keep:   [B, Q]     True if token passes purity filter (and optional bg-only drop)
-
-    Logic:
-      - Build 1-hot over (C+1) classes: last channel is 'ignore'.
-      - Pool to tokens.
-      - Optionally renormalize class probs over non-ignore pixels.
-      - keep = (max_class_prob >= purity_thresh) AND (optionally not background-only).
-    """
-    Ht, Wt = grid_size
-
-    if targets_sem.ndim == 4:
-        targets_sem = targets_sem.squeeze(1)
-    assert targets_sem.ndim == 3, "targets_sem must be [B,H,W] or [B,1,H,W]"
-    B, H, W = targets_sem.shape
-    device = targets_sem.device
-
-    # Map ignore to extra class C (so one_hot stays in-range)
-    IGN_CH = num_classes  # index of ignore channel
-    safe = targets_sem.clone()
-    safe[targets_sem == ignore_idx] = IGN_CH
-    # One-hot on C+1, then pool
-    oh = F.one_hot(safe.long(), num_classes=num_classes + 1)  # [B,H,W,C+1]
-    oh = oh.permute(0, 3, 1, 2).float()  # [B,C+1,H,W]
-    pooled = F.adaptive_avg_pool2d(oh, (Ht, Wt))  # [B,C+1,Ht,Wt]
-
-    # Split real classes vs ignore
-    class_probs = pooled[:, :num_classes]  # [B,C,Ht,Wt]
-    ignore_frac = pooled[:, IGN_CH:IGN_CH + 1]  # [B,1,Ht,Wt]
-
-    # Optionally renormalize over non-ignore to get true "purity" among valid pixels
-    if renorm_exclude_ignore:
-        denom = class_probs.sum(dim=1, keepdim=True).clamp_min(
-            1e-8)  # sum over classes
-        class_purity = class_probs / denom
-    else:
-        # purity measured vs all pixels in the token (ignore contributes to lowering purity)
-        class_purity = class_probs
-
-    # Foreground presence (exclude background) if requested
-    if drop_background_only and num_classes > 1:
-        # any foreground after pooling?
-        fg = torch.cat([class_probs[:, :bg_idx], class_probs[:, bg_idx + 1:]],
-                       dim=1)  # [B,C-1,Ht,Wt]
-        has_fg = (fg.sum(dim=1) > 0)  # [B,Ht,Wt] bool
-    else:
-        has_fg = torch.ones((B, Ht, Wt), dtype=torch.bool, device=device)
-
-    # Purity thresholding
-    if purity_thresh is not None:
-        # max over *all* real classes (including background unless you don’t want that)
-        max_purity, argmax_cls = class_purity.max(dim=1)  # [B,Ht,Wt]
-        pass_thresh = (max_purity >= float(purity_thresh))
-        # If you don’t want background-only to pass purity (e.g., 0.99 bg), combine with has_fg:
-        keep_mask = pass_thresh & has_fg
-    else:
-        keep_mask = has_fg
-
-    # Prepare outputs
-    y_soft = class_probs.flatten(2).transpose(1, 2).contiguous()  # [B,Q,C]
-    keep = keep_mask.flatten(1).contiguous()  # [B,Q]
-    return y_soft, keep
-
-
-@torch.no_grad()
-def masks_to_token_hard_from_semantic(
-    targets_sem: torch.Tensor,  # [B,1,H,W] or [B,H,W] (long)
-    num_classes: int,  # C (incl. background; e.g., bg=0)
-    grid_size: Tuple[int, int],  # (Ht, Wt)
-    ignore_idx: int = 255,
-    *,
-    bg_idx: int = 0,
-    renorm_exclude_ignore: bool = True,  # renormalize over non-ignore pixels
-    drop_background_only: bool = True,  # mark tokens with only bg as invalid
-    purity_thresh: Optional[
-        float] = None,  # e.g., 0.9 ⇒ require ≥90% purity; None disables
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Returns:
-      y_hard: [B, Q] long   token class ids in [0..C-1] (argmax over pooled per-class fractions)
-      valid:  [B, Q] bool   True if token passes filters (non-ignore, purity, foreground if requested)
-
-    Notes:
-      - If renorm_exclude_ignore=True, class fractions are computed over non-ignore pixels only.
-      - If drop_background_only=True, tokens with no foreground (any class != bg_idx) are invalid.
-      - If purity_thresh is set, max class purity must be >= threshold.
-    """
-    Ht, Wt = grid_size
-
-    if targets_sem.ndim == 4:
-        targets_sem = targets_sem.squeeze(1)
-    assert targets_sem.ndim == 3, "targets_sem must be [B,H,W] or [B,1,H,W]"
-    B, H, W = targets_sem.shape
-    device = targets_sem.device
-
-    # Map ignore to extra channel C so one_hot stays in range
-    IGN_CH = num_classes
-    safe = targets_sem.clone()
-    safe[targets_sem == ignore_idx] = IGN_CH
-
-    # One-hot on C+1, then pool to token grid
-    oh = F.one_hot(safe.long(), num_classes=num_classes + 1)  # [B,H,W,C+1]
-    oh = oh.permute(0, 3, 1, 2).float()  # [B,C+1,H,W]
-    pooled = F.adaptive_avg_pool2d(oh, (Ht, Wt))  # [B,C+1,Ht,Wt]
-
-    class_probs = pooled[:, :num_classes]  # [B,C,Ht,Wt]
-    ignore_frac = pooled[:, IGN_CH:IGN_CH + 1]  # [B,1,Ht,Wt]
-
-    # Optionally renormalize class fractions over non-ignore pixels
-    if renorm_exclude_ignore:
-        denom = class_probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
-        class_frac = class_probs / denom  # [B,C,Ht,Wt]
-    else:
-        class_frac = class_probs  # relative to (valid + ignore)
-
-    # Foreground presence (exclude background)
-    if drop_background_only and num_classes > 1:
-        fg_probs = torch.cat(
-            [class_probs[:, :bg_idx], class_probs[:, bg_idx + 1:]],
-            dim=1)  # [B,C-1,Ht,Wt]
-        has_fg = (fg_probs.sum(dim=1) > 0)  # [B,Ht,Wt] bool
-    else:
-        has_fg = torch.ones((B, Ht, Wt), dtype=torch.bool, device=device)
-
-    # Argmax class (hard label) and max purity
-    max_purity, y_argmax = class_frac.max(dim=1)  # [B,Ht,Wt], [B,Ht,Wt]
-
-    # Purity criterion
-    if purity_thresh is not None:
-        pass_purity = (max_purity >= float(purity_thresh))
-    else:
-        pass_purity = torch.ones_like(max_purity, dtype=torch.bool)
-
-    keep = pass_purity & has_fg  # [B,Ht,Wt] bool
-
-    # Flatten to tokens
-    Q = Ht * Wt
-    y_hard = y_argmax.flatten(1).contiguous().long()  # [B,Q]
-    valid = keep.flatten(1).contiguous()  # [B,Q]
-
-    return y_hard, valid
-
-
 class ProtoNetLayer(nn.Module):
+    """
+    Prototype head operating in a (optionally) projected feature space.
 
-    def __init__(self,
-                 metric="L2",
-                 center_feats=True,
-                 normalize_feats=True,
-                 num_prototypes=7,
-                 embedding_dim=1024):
+    Pipeline (for a single feature vector x):
+      1) x_centered = x - mean               (if center_feats=True)
+      2) z = x_centered @ proj_matrix        (if proj_matrix is set, else identity)
+      3) z = normalize(z)                    (if normalize_feats=True)
+      4) scores = similarity(z, prototypes)
+
+    Buffers meant to be loaded from a .pt file (CLI):
+      - mean:          [D_in]           (feature mean in encoder space)
+      - proj_matrix:   [D_in, D_proj]   (e.g., PCA components^T)
+      - prototypes:    [C, D_proj]      (class prototypes in projected space)
+    """
+
+    def __init__(
+        self,
+        num_prototypes: int,
+        embedding_dim: int,
+        proj_dim: Optional[int] = None,
+        metric: str = "l2",
+        center_feats: bool = True,
+        normalize_feats: bool = True,
+        learnable_proj: bool = False,
+    ):
         super().__init__()
         m = metric.lower()
         assert m in ("l2", "cosine")
-        self.metric, self.center_feats, self.normalize_feats = m, center_feats, normalize_feats
-        self.num_prototypes, self.embedding_dim = num_prototypes, embedding_dim
+        self.metric = m
+        self.center_feats = center_feats
+        self.normalize_feats = normalize_feats
 
-        self.register_buffer("prototypes",
-                             torch.zeros(num_prototypes, embedding_dim),
-                             persistent=True)
-        self.register_buffer("proto_counts",
-                             torch.zeros(num_prototypes),
-                             persistent=True)
-        self.register_buffer("mean",
-                             torch.zeros(embedding_dim),
-                             persistent=True)
-        self.register_buffer("support_count", torch.zeros(1), persistent=True)
+        self.embedding_dim = embedding_dim  # D_in
+        self.proj_dim = proj_dim or embedding_dim  # D_proj
 
-    def _preprocess(self, X: torch.Tensor) -> torch.Tensor:
+        # --- Projection: either fixed matrix (buffer) or learnable Linear ---
+        if learnable_proj:
+            # This is for the future LACE-style learning
+            self.proj = nn.Linear(embedding_dim, self.proj_dim, bias=False)
+            self.register_buffer("proj_matrix", None, persistent=False)
+        else:
+            self.proj = None
+            # Default: identity projection
+            I = torch.eye(embedding_dim, self.proj_dim)
+            self.register_buffer("proj_matrix", I, persistent=True)
+
+        # --- Statistics to be filled by CLI ---
+        self.register_buffer(
+            "mean", torch.zeros(embedding_dim), persistent=True
+        )  # [D_in]
+
+        # Prototypes live in projected space [C, D_proj]
+        self.register_buffer(
+            "prototypes",
+            torch.zeros(num_prototypes, self.proj_dim),
+            persistent=True,
+        )
+        # Optional: counts (useful for debugging or analysis)
+        self.register_buffer(
+            "class_counts",
+            torch.zeros(num_prototypes),
+            persistent=True,
+        )
+
+    # --------- Helpers for the CLI / loading ----------
+
+    @torch.no_grad()
+    def load_stats(
+        self,
+        mean: torch.Tensor,
+        prototypes: torch.Tensor,
+        proj_matrix: Optional[torch.Tensor] = None,
+        class_counts: Optional[torch.Tensor] = None,
+    ) -> None:
+        """
+        Load precomputed statistics (from CLI):
+
+          mean:         [D_in]
+          prototypes:   [C, D_proj]
+          proj_matrix:  [D_in, D_proj] (optional)
+        """
+        assert mean.shape[-1] == self.embedding_dim
+        assert prototypes.shape[1] == self.proj_dim
+
+        self.mean.copy_(mean)
+        self.prototypes.copy_(prototypes)
+
+        if proj_matrix is not None:
+            assert (
+                proj_matrix.shape[0] == self.embedding_dim
+                and proj_matrix.shape[1] == self.proj_dim
+            )
+            if self.proj is not None:
+                # if projection is learnable, you *could* initialize it with this matrix
+                self.proj.weight.copy_(proj_matrix.T)
+            else:
+                self.proj_matrix.copy_(proj_matrix)
+
+        if class_counts is not None:
+            self.class_counts.copy_(class_counts)
+
+    # --------- Core preprocessing & forward ----------
+
+    def _project(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        X: [N, D_in] in encoder feature space.
+        Returns: Z: [N, D_proj] in projected space.
+        """
         if self.center_feats:
-            X = X - self.mean
+            X = X - self.mean  # broadcast over batch
+
+        if self.proj is not None:
+            Z = self.proj(X)
+        elif self.proj_matrix is not None:
+            Z = X @ self.proj_matrix
+        else:
+            # identity
+            Z = X
+
         if self.normalize_feats:
-            X = F.normalize(X, dim=-1)
-        return X
+            Z = F.normalize(Z, dim=-1)
 
-    @torch.no_grad()
-    def update_mean(self, X: torch.Tensor) -> None:
-        """X: [N,D] valid tokens only."""
-        Xm = F.normalize(X, dim=-1) if self.normalize_feats else X
-        n = float(Xm.shape[0])
-        tot = float(self.support_count.item())
-        self.mean.copy_((self.mean * tot + Xm.sum(0)) / (tot + n))
-        self.support_count += n
-
-    @torch.no_grad()
-    def update_prototype(self, X: torch.Tensor, y_soft: torch.Tensor) -> None:
-        """X: [N,D], y_soft: [N,C] (soft rows; needn’t sum to 1)."""
-        Xp = self._preprocess(X)
-        class_sums = y_soft.T @ Xp  # [C,D]
-        class_counts = y_soft.sum(0)  # [C]
-        new_cnt = self.proto_counts + class_counts
-        mask = class_counts > 0
-        denom = new_cnt.clamp_min(1e-12).unsqueeze(1)
-
-        P = self.prototypes.clone()
-        P[mask] = (self.prototypes[mask] * self.proto_counts[mask].unsqueeze(1)
-                   + class_sums[mask]) / denom[mask]
-        self.prototypes.copy_(P)
-        self.proto_counts.copy_(new_cnt)
+        return Z
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        Xp, P = self._preprocess(X), self.prototypes
+        """
+        X: [B, Q, D_in] or [N, D_in]
+        Returns:
+          scores: [B, Q, C] (or [N, C]) – similarity per prototype
+        """
+        orig_shape = X.shape
+        if X.ndim == 3:
+            B, Q, D = X.shape
+            X_flat = X.reshape(B * Q, D)
+        elif X.ndim == 2:
+            X_flat = X
+            B = Q = None
+        else:
+            raise ValueError("X must be [B,Q,D] or [N,D]")
+
+        Z = self._project(X_flat)  # [N, D_proj]
+        P = self.prototypes  # [C, D_proj]
+
         if self.metric == "l2":
-            return -(Xp.unsqueeze(2) - P).norm(dim=-1, p=2)
-        Xn, Pn = F.normalize(Xp, dim=-1), F.normalize(P, dim=-1)
-        return Xn @ Pn.T
+            # negative L2 distance as similarity
+            # (N, C) = -( (Z - P)^2 summed over dim )
+            # we do this efficiently: ||Z-P|| = norm(Z-P, p=2)
+            diff = Z.unsqueeze(1) - P.unsqueeze(0)  # [N, C, D_proj]
+            scores = -diff.norm(dim=-1, p=2)  # [N, C]
+        else:
+            # cosine similarity
+            Z_n = F.normalize(Z, dim=-1)
+            P_n = F.normalize(P, dim=-1)
+            scores = Z_n @ P_n.T  # [N, C]
+
+        if B is not None:
+            scores = scores.view(B, Q, -1)  # [B, Q, C]
+
+        return scores
 
 
 class ProtoNetDecoder(Encoder):
+    """
+    Encoder → token features → ProtoNetLayer → per-patch logits.
 
-    def __init__(self,
-                 encoder_name="hf-hub:MahmoodLab/UNI2-h",
-                 num_classes=7,
-                 img_size=(448, 448),
-                 sub_norm=False,
-                 patch_size=14,
-                 pretrained=True,
-                 ckpt_path="",
-                 metric="L2",
-                 center_feats=True,
-                 normalize_feats=True,
-                 ignore_idx=255):
-        super().__init__(encoder_name=encoder_name,
-                         img_size=img_size,
-                         sub_norm=sub_norm,
-                         patch_size=patch_size,
-                         pretrained=pretrained,
-                         ckpt_path=ckpt_path)
-        self.ignore_idx = ignore_idx
+    Expects Encoder.forward(imgs) -> [B, Q, D_in].
+    grid_size is used only to reshape tokens to spatial map [Ht, Wt].
+    """
+
+    def __init__(
+        self,
+        encoder_id: str = "h0-mini",
+        img_size: Tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        num_classes: int = 7,
+        grid_size: Tuple[int, int] = (14, 14),  # (Ht, Wt) so that Q = Ht * Wt
+        metric: str = "l2",
+        center_feats: bool = True,
+        normalize_feats: bool = True,
+        proj_dim: Optional[int] = None,
+        prototypes_path: Optional[str] = None,
+    ):
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+        )
         self.num_classes = num_classes
-        self.head = ProtoNetLayer(metric=metric,
-                                  center_feats=center_feats,
-                                  normalize_feats=normalize_feats,
-                                  num_prototypes=num_classes,
-                                  embedding_dim=self.embed_dim)
+        self.grid_size = grid_size
+
+        self.head = ProtoNetLayer(
+            num_prototypes=num_classes,
+            embedding_dim=self.embed_dim,
+            proj_dim=proj_dim,
+            metric=metric,
+            center_feats=center_feats,
+            normalize_feats=normalize_feats,
+            learnable_proj=False,  # for now, PCA-style
+        )
+
+        # Optionally load mean, prototypes, projection matrix from file
+        if prototypes_path is not None:
+            payload = torch.load(prototypes_path, map_location="cpu")
+            mean = payload["mean"]  # [D_in]
+            prototypes = payload["prototypes"]  # [C, D_proj]
+            proj_matrix = payload.get("proj_matrix", None)  # [D_in, D_proj] or None
+            counts = payload.get("class_counts", None)
+
+            with torch.no_grad():
+                self.head.load_stats(mean, prototypes, proj_matrix, counts)
 
     @torch.no_grad()
     def tokens_from_images(self, imgs: torch.Tensor) -> torch.Tensor:
-        # Expect Encoder.forward -> [B,Q,D]
+        # Expect Encoder.forward -> [B, Q, D_in]
         return super().forward(imgs)
 
-    @torch.no_grad()
-    def update_mean_from_batch(self, imgs: torch.Tensor,
-                               targets_sem: torch.Tensor):
-        """imgs: [B,3,T,T]; targets_sem: [B,1,T,T] or [B,T,T] longs with ignore."""
-        device = next(self.parameters()).device
-        tokens = self.tokens_from_images(imgs.to(device))  # [B,Q,D]
-        B, Q, D = tokens.shape
-        y_soft, valid = masks_to_token_soft_from_semantic(
-            targets_sem.to(device),
-            self.num_classes,
-            self.grid_size,
-            self.ignore_idx,
-        )
-        X = tokens.reshape(B * Q, D)
-        m = valid.reshape(B * Q)
-        self.head.update_mean(X[m])
-
-    @torch.no_grad()
-    def update_prototypes_from_batch(self, imgs: torch.Tensor,
-                                     targets_sem: torch.Tensor):
-        device = next(self.parameters()).device
-        tokens = self.tokens_from_images(imgs.to(device))  # [B,Q,D]
-        B, Q, D = tokens.shape
-        y_soft, valid = masks_to_token_soft_from_semantic(
-            targets_sem.to(device),
-            self.num_classes,
-            self.grid_size,
-            self.ignore_idx,
-        )
-        X = tokens.reshape(B * Q, D)
-        Y = y_soft.reshape(B * Q, self.head.num_prototypes)
-        m = valid.reshape(B * Q)
-        self.head.update_prototype(X[m], Y[m])
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = super().forward(x)
-        x = self.head(x)
-        x = x.transpose(1, 2)
+        """
+        x: [B,3,H,W]
 
-        return x.reshape(x.shape[0], -1, *self.grid_size)
+        Returns:
+          logits: [B, C, Ht, Wt]
+        """
+        tokens = self.tokens_from_images(x)  # [B,Q,D_in]
+        B, Q, D = tokens.shape
+        Ht, Wt = self.grid_size
+        assert Q == Ht * Wt, f"Q={Q} must equal Ht*Wt={Ht * Wt}"
+
+        scores = self.head(tokens)  # [B,Q,C]
+        scores = scores.transpose(1, 2)  # [B,C,Q]
+        return scores.reshape(B, self.num_classes, Ht, Wt)

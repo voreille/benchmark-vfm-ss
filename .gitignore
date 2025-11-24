@@ -167,6 +167,5 @@ cython_debug/
 #.idea/
 
 /data/
-/explo_notebooks/
 /explo/
 /output/
