@@ -1,9 +1,10 @@
 from pathlib import Path
-from typing import Union, Optional
+from typing import Optional, Union
 
 import pandas as pd
-from torch.utils.data import DataLoader
+from lightning.pytorch.utilities import rank_zero_info
 from torch import nn
+from torch.utils.data import DataLoader
 
 from datasets.anorak_dataset import Dataset, PredictDataset
 from datasets.lightning_data_module import LightningDataModule
@@ -26,10 +27,8 @@ class ANORAK(LightningDataModule):
         ignore_idx: int = 255,
         overwrite_root: str = None,
         prefetch_factor: int = 2,
-        lcm_align: int = 224,
         transforms: Optional[nn.Module] = None,
         epoch_repeat: int = 1,
-        model_type: str = "mask2former",
     ) -> None:
         super().__init__(
             root=root,
@@ -47,6 +46,8 @@ class ANORAK(LightningDataModule):
 
         root_dir = Path(root)
         self.fold = fold
+        rank_zero_info(f"[ANORAK] Initializing datamodule with fold = {self.fold}")
+        rank_zero_info(f"[ANORAK] Initializing datamodule with batch_size = {batch_size}")
 
         self.images_dir = root_dir / "image"
         self.masks_dir = root_dir / "mask"
@@ -60,10 +61,9 @@ class ANORAK(LightningDataModule):
         if transforms is not None:
             self.transforms = transforms
         else:
-            self.transforms = CustomTransformsVaryingSize(
+            self.transforms = CustomTransforms(
                 img_size=img_size,
                 scale_range=scale_range,
-                lcm_align=lcm_align,
             )
 
     def _get_split_ids(self):

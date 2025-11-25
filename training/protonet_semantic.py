@@ -10,7 +10,6 @@ from training.tiler import Tiler
 
 
 class ProtoNetSemantic(LightningModule):
-
     def __init__(
         self,
         network: nn.Module,
@@ -24,7 +23,7 @@ class ProtoNetSemantic(LightningModule):
         lr_multiplier_encoder: float = 0.1,
         freeze_encoder: bool = False,
         tiler: Optional[Tiler] = None,
-        prototypes_path: Optional[str] = None,
+        # prototypes_path REMOVED – handled by `network` (ProtoNetDecoder) itself
     ):
         super().__init__(
             img_size=img_size,
@@ -39,30 +38,22 @@ class ProtoNetSemantic(LightningModule):
         self.save_hyperparameters(ignore=["network"])
 
         self.ignore_idx = ignore_idx
-        # Load prototypes & mean
-
-        if prototypes_path is not None:
-            payload = torch.load(prototypes_path, map_location="cpu")
-            P = payload["prototypes"]  # [C,D]
-            M = payload["mean"]  # [D]
-
-            with torch.no_grad():
-                self.network.head.prototypes.copy_(P)
-                self.network.head.mean.copy_(M)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         split = self.trainer.datamodule.predict_splits[dataloader_idx]
         imgs, targets, img_ids = batch
+
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops)  # (N,C,h,w)
-        crop_logits = F.interpolate(crop_logits,
-                                    self.img_size,
-                                    mode="bilinear")
+        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+
         logits = self.revert_window_logits_semantic(
-            crop_logits, origins, img_sizes)  # list of (C,H,W)
+            crop_logits, origins, img_sizes
+        )  # list of (C,H,W)
+
         # per-pixel targets
-        targets_pp = self.to_per_pixel_targets_semantic(
-            targets, self.ignore_idx)
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
         outs = []
         for i, logit in enumerate(logits):
             pred = torch.argmax(logit, dim=0)  # (H,W)
@@ -79,12 +70,13 @@ class ProtoNetSemantic(LightningModule):
                     vals.append(inter / union)
             miou = float(np.mean(vals)) if vals else float("nan")
 
-            # reuse your plot function to get a PIL Image
             fig_img = self.plot_semantic(imgs[i], tgt, logits=logit)
-            outs.append({
-                "pil": fig_img,
-                "miou": miou,
-                "split": split,
-                "img_id": img_ids[i]
-            })
+            outs.append(
+                {
+                    "pil": fig_img,
+                    "miou": miou,
+                    "split": split,
+                    "img_id": img_ids[i],
+                }
+            )
         return outs

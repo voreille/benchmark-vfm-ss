@@ -71,13 +71,7 @@ class Dataset(torch.utils.data.Dataset):
                 masks.append(mask == label_id)
                 labels.append(torch.tensor([class_id]))
 
-        target = {
-            "masks": tv_tensors.Mask(torch.stack(masks)),
-            "labels": torch.cat(labels),
-        }
-
-        if self.transforms is not None:
-            image, target = self.transforms(image, target)
+        target = {}
 
         if len(masks) > 0:
             target["masks"] = tv_tensors.Mask(torch.stack(masks))
@@ -88,6 +82,9 @@ class Dataset(torch.utils.data.Dataset):
                 torch.zeros((0, *mask.shape), dtype=torch.bool)
             )
             target["labels"] = torch.zeros((0,), dtype=torch.int64)
+
+        if self.transforms is not None:
+            image, target = self.transforms(image, target)
 
         return image, target
 

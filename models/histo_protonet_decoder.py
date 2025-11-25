@@ -173,8 +173,12 @@ class ProtoNetDecoder(Encoder):
     """
     Encoder → token features → ProtoNetLayer → per-patch logits.
 
-    Expects Encoder.forward(imgs) -> [B, Q, D_in].
-    grid_size is used only to reshape tokens to spatial map [Ht, Wt].
+    If `prototypes_path` is given, it should point to a `.pt` file created by
+    your CLI, containing:
+      - mean: [D_in]
+      - proj_matrix: [D_in, D_proj]
+      - prototypes: [C, D_proj]
+      - class_counts: [C] (optional)
     """
 
     def __init__(
@@ -184,7 +188,6 @@ class ProtoNetDecoder(Encoder):
         ckpt_path: str = "",
         sub_norm: bool = False,
         num_classes: int = 7,
-        grid_size: Tuple[int, int] = (14, 14),  # (Ht, Wt) so that Q = Ht * Wt
         metric: str = "l2",
         center_feats: bool = True,
         normalize_feats: bool = True,
@@ -198,7 +201,6 @@ class ProtoNetDecoder(Encoder):
             sub_norm=sub_norm,
         )
         self.num_classes = num_classes
-        self.grid_size = grid_size
 
         self.head = ProtoNetLayer(
             num_prototypes=num_classes,

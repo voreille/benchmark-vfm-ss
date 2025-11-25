@@ -15,17 +15,18 @@
             },
         },
         {
-            "name": "Python: main.py fit ANORAK",
+            "name": "Python: main.py fit ANORAK Linear Semantic",
             "type": "debugpy",
             "request": "launch",
             "program": "main.py",
             "args": [
                 "fit",
                 "-c",
-                "/home/valentin/workspaces/benchmark-vfm-ss/configs/anorak_linear_semantic_debug.yaml",
+                "/home/valentin/workspaces/benchmark-vfm-ss/configs/anorak_linear_semantic.yaml",
                 "--root",
                 "data/",
-                "--no_compile"
+                "--no_compile",
+                "--trainer.logger=false",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -129,29 +130,43 @@
             "justMyCode": false
         },
         {
-            "name": "Python: compute-prototypes ANORAK ProtoNet",
+            "name": "Python: fit ProtoNet stats ANORAK",
             "type": "debugpy",
             "request": "launch",
-            "program": "protonet_cli.py",
+            "program": "fit_protonet_stats.py",
             "args": [
-                "compute-prototypes",
                 "--root-dir",
                 "data/ANORAK_10x",
                 "--fold",
                 "0",
                 "--img-size",
-                "448",
-                "448",
+                "672",
+                "672",
                 "--batch-size",
                 "1",
                 "--num-workers",
                 "4",
-                "--device",
-                "0",
+                "--num-classes",
+                "7",
+                "--ignore-idx",
+                "255",
+                "--encoder-id",
+                "h0-mini",
                 "--metric",
                 "L2",
-                "--save-path",
-                "output/anorak/prototypes_fold0.pt"
+                // devices: Click has --device / -d (multiple=True)
+                "--device",
+                "0",
+                // optional: cap tokens per class (balanced across images)
+                // "--max-tokens-per-class", "50000",
+                // optional: PCA settings (pick ONE style)
+                // "--proj-dim", "128",
+                // or
+                // "--pca-evr", "0.95",
+                // optional: LEACE projection
+                // "--leace-proj-path", "output/leace_proj.pt",
+                "--output-path",
+                "output/anorak/protonet_stats_fold0.pt"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",

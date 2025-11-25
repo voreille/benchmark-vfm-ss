@@ -12,7 +12,6 @@ from training.tiler import Tiler
 
 
 class LinearSemantic(LightningModule):
-
     def __init__(
         self,
         network: nn.Module,
@@ -43,35 +42,37 @@ class LinearSemantic(LightningModule):
         self.ignore_idx = ignore_idx
         self.poly_lr_decay_power = poly_lr_decay_power
 
-        # just remember the init value; we’ll materialize criterion in setup()
-        self._init_class_weights = class_weights
-        self.criterion = None  # set in setup()
         if class_weights is not None:
             weights = class_weights
         else:
             # pull from datamodule in setup()
             weights = None
-        self._init_class_weights = weights
-        self.criterion = None
+
+        # self._init_class_weights = weights
+        # self.criterion = None
 
         self.init_metrics_semantic(num_classes, ignore_idx, num_metrics)
+        self.criterion = nn.CrossEntropyLoss(
+            ignore_index=self.ignore_idx,
+            weight=torch.tensor(weights) if weights is not None else None,
+        )
 
-    def setup(self, stage=None):
-        if stage in (None, "fit"):
-            w = (torch.tensor(self._init_class_weights,
-                              dtype=torch.float32,
-                              device=self.device)
-                 if self._init_class_weights is not None else getattr(
-                     self.trainer.datamodule, "class_weights", None))
-            if w is not None and not torch.is_tensor(w):
-                w = torch.tensor(w, dtype=torch.float32, device=self.device)
-            print(f"Using class weights: {w} for semantic loss")
-            self.criterion = CrossEntropyDiceLoss(class_weights=w,
-                                                  ignore_index=self.ignore_idx,
-                                                  ce_weight=0.5,
-                                                  dice_weight=0.5)
-        else:
-            self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_idx)
+    # def setup(self, stage=None):
+    #     if stage in (None, "fit"):
+    #         w = (torch.tensor(self._init_class_weights,
+    #                           dtype=torch.float32,
+    #                           device=self.device)
+    #              if self._init_class_weights is not None else getattr(
+    #                  self.trainer.datamodule, "class_weights", None))
+    #         if w is not None and not torch.is_tensor(w):
+    #             w = torch.tensor(w, dtype=torch.float32, device=self.device)
+    #         print(f"Using class weights: {w} for semantic loss")
+    #         self.criterion = CrossEntropyDiceLoss(class_weights=w,
+    #                                               ignore_index=self.ignore_idx,
+    #                                               ce_weight=0.5,
+    #                                               dice_weight=0.5)
+    #     else:
+    # self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_idx)
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch
@@ -99,11 +100,8 @@ class LinearSemantic(LightningModule):
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops)
-        crop_logits = F.interpolate(crop_logits,
-                                    self.img_size,
-                                    mode="bilinear")
-        logits = self.revert_window_logits_semantic(crop_logits, origins,
-                                                    img_sizes)
+        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+        logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
 
         if is_notebook:
             return logits
@@ -118,9 +116,8 @@ class LinearSemantic(LightningModule):
                 targets[0],
                 logits=logits[0],
             )
-            if hasattr(self.trainer.logger.experiment, "log"):
-                self.trainer.logger.experiment.log({name: [wandb.Image(plot)]
-                                                    })  # type: ignore
+            # single clean call, no logger assumptions here
+            self.log_wandb_image(name, plot, commit=False)
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
@@ -129,14 +126,12 @@ class LinearSemantic(LightningModule):
         optimizer = super().configure_optimizers()
 
         lr_scheduler = {
-            "scheduler":
-            PolynomialLR(
+            "scheduler": PolynomialLR(
                 optimizer,
                 int(self.trainer.estimated_stepping_batches),
                 self.poly_lr_decay_power,
             ),
-            "interval":
-            "step",
+            "interval": "step",
         }
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}

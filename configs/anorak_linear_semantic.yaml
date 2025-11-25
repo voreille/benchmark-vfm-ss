@@ -1,30 +1,41 @@
 trainer:
+  precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
   val_check_interval: ~
-  check_val_every_n_epoch: 10
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
-model:
-  class_path: training.linear_semantic.LinearSemantic
-  init_args:
-    freeze_encoder: True
-    # class_weights: [0.2017, 6.5578, 13.1251, 1.3079, 4.0261, 1.9674, 3.4201]
-    network:
-      class_path: models.histo_linear_decoder.LinearDecoder
-      init_args:
-        encoder_name: "hf-hub:MahmoodLab/UNI2-h"
-        img_size: [448, 448]
-    tiler:
-      class_path: training.tiler.GridPadTiler
-      init_args:
-        tile: 448
-        stride: 384 # overlap = 64
-        weighted_blend: false # or true
-        pad_mode: "constant" # optional; nice for images
-        pad_value: 0.0
+    init_args:
+      project: anorak
+      group: linear_head
+      job_type: baseline
+      tags: ["baseline"]
+      save_dir: ./wandb
+      log_model: false # avoid artifact uploads in debug
 data:
   class_path: datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK
-    img_size: [448, 448]
+    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    img_size: [672, 672]
     prefetch_factor: 4
+    num_workers: 0
+    batch_size: 16
+    fold: 0
+    epoch_repeat: 30
+model:
+  class_path: training.linear_semantic.LinearSemantic
+  init_args:
+    freeze_encoder: False
+    network:
+      class_path: models.histo_linear_decoder.LinearDecoder
+      init_args:
+        encoder_id: "h0-mini"
+    tiler:
+      class_path: training.tiler.GridPadTiler
+      init_args:
+        tile: 672
+        stride: 384
+        weighted_blend: true # or true
+        pad_mode: "replicate" # optional; nice for images
+        pad_value: 0.0

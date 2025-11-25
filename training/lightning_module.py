@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from matplotlib.lines import Line2D
 from PIL import Image
 from torch.nn.functional import interpolate
@@ -347,3 +348,30 @@ class LightningModule(lightning.LightningModule):
                 "img_id": img_ids[i]
             })
         return outs
+
+    def get_wandb_experiment(self):
+        """Return the wandb.Run object if available, else None."""
+        trainer = getattr(self, "trainer", None)
+        if trainer is None:
+            return None
+
+        # Case 1 — single logger: trainer.logger
+        logger = getattr(trainer, "logger", None)
+        exp = getattr(logger, "experiment", None)
+        if exp is not None and hasattr(exp, "log"):
+            return exp
+
+        # Case 2 — multiple loggers: trainer.loggers (a Python list)
+        loggers = getattr(trainer, "loggers", None)
+        if isinstance(loggers, list):
+            for lg in loggers:
+                exp = getattr(lg, "experiment", None)
+                if exp is not None and hasattr(exp, "log"):
+                    return exp
+
+        return None
+
+    def log_wandb_image(self, name: str, image, commit: bool = False):
+        exp = self.get_wandb_experiment()
+        if exp is not None:
+            exp.log({name: [wandb.Image(image)]}, commit=commit)
