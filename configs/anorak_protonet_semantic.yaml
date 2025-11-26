@@ -1,8 +1,19 @@
 trainer:
+  precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
   val_check_interval: ~
-  check_val_every_n_epoch: 10
-  logger: ~
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: anorak
+      group: protonet_head
+      job_type: experiment
+      tags: ["protonet", "wahoo", "10x"]
+      save_dir: ./wandb
+      log_model: false # avoid artifact uploads in debug
+
 model:
   class_path: training.protonet_semantic.ProtoNetSemantic
   init_args:
@@ -10,7 +21,7 @@ model:
     network:
       class_path: models.histo_protonet_decoder.ProtoNetDecoder
       init_args:
-        prototypes_path: "/home/valentin/workspaces/benchmark-vfm-ss/output/anorak/prototypes_fold0.pt"
+        prototypes_path: "/home/valentin/workspaces/benchmark-vfm-ss/output/anorak/h0_mini/protonet_stats_fold0.pt"
     tiler:
       class_path: training.tiler.GridPadTiler
       init_args:

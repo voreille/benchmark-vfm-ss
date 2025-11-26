@@ -23,6 +23,7 @@ except ImportError:
 from datasets.anorak import ANORAKFewShot
 from models.histo_protonet_decoder import ProtoNetDecoder
 from training.tiler import GridPadTiler, Tiler
+from models.histo_encoder import Encoder
 
 
 # ---------------------------
@@ -208,7 +209,7 @@ def load_leace_proj(path: str, in_dim: int) -> torch.Tensor:
 
 @torch.no_grad()
 def accumulate_features_and_labels(
-    decoder: ProtoNetDecoder,
+    encoder: Encoder,
     dataloader: DataLoader,
     img_tiler: Tiler,
     target_tiler: Tiler,
@@ -228,8 +229,8 @@ def accumulate_features_and_labels(
     y_list: list[torch.Tensor] = []
     img_ids_list: list[torch.Tensor] = []
 
-    decoder.eval()
-    decoder.to(device)
+    encoder.eval()
+    encoder.to(device)
 
     global_img_offset = 0  # to give each original image a unique id across batches
 
@@ -264,7 +265,7 @@ def accumulate_features_and_labels(
         tgt_crops = tgt_crops.to(device)
 
         # 3) tokens from encoder
-        tokens = decoder.tokens_from_images(img_crops)  # [Nc, Q, D_in]
+        tokens = encoder(img_crops)  # [Nc, Q, D_in]
         Nc, Q, D = tokens.shape
 
         # 4) simple mask->token mapping (downsample to ViT grid)
@@ -295,7 +296,7 @@ def accumulate_features_and_labels(
 
     if not X_list:
         return (
-            torch.empty(0, decoder.embed_dim),
+            torch.empty(0, encoder.embed_dim),
             torch.empty(0, dtype=torch.long),
             torch.empty(0, dtype=torch.long),
         )
@@ -359,8 +360,6 @@ def build_train_loader(
 @click.option("--num-workers", type=int, default=0, show_default=True)
 @click.option("--prefetch-factor", type=int, default=2, show_default=True)
 @click.option("--num-metrics", type=int, default=1, show_default=True)
-# tiler stride
-@click.option("--stride", type=int, default=448, show_default=True, help="Stride.")
 @click.option(
     "--weighted-blend",
     is_flag=True,
@@ -447,7 +446,6 @@ def main(
     num_workers: int,
     prefetch_factor: int,
     num_metrics: int,
-    stride: int,
     weighted_blend: bool,
     encoder_id: str,
     ckpt_path: str,
@@ -459,8 +457,8 @@ def main(
     max_tokens_per_class: int,
     leace_proj_path: str,
     device: tuple[int, ...],
-    output_path: str,
-    yaml_path: str,
+    output_path: str | Path,
+    yaml_path: str | Path,
 ) -> None:
     """Fit ProtoNet mean/PCA/LEACE/prototypes from ANORAK segmentation data."""
     devices = list(device)
@@ -477,35 +475,31 @@ def main(
     norm_enabled = not no_normalize_feats
 
     # 1) Build encoder/decoder
-    decoder = (
-        ProtoNetDecoder(
+    encoder = (
+        Encoder(
             encoder_id=encoder_id,
-            num_classes=num_classes,
             img_size=img_size,
             sub_norm=False,
             ckpt_path=ckpt_path,
-            metric=metric,
-            center_feats=center_enabled,
-            normalize_feats=norm_enabled,
         )
         .to(dev)
         .eval()
     )
 
     # we now know the ViT token grid from the decoder
-    grid_size = tuple(decoder.grid_size)  # (Ht, Wt)
+    grid_size = tuple(encoder.grid_size)  # (Ht, Wt)
 
     # 2) Build tilers (image: replicate; targets: constant ignore_idx)
     img_tiler = GridPadTiler(
         tile=tile_size,
-        stride=stride,
+        stride=tile_size,
         weighted_blend=weighted_blend,
         pad_mode="replicate",
         pad_value=0.0,
     )
     tgt_tiler = GridPadTiler(
         tile=tile_size,
-        stride=stride,
+        stride=tile_size,
         weighted_blend=False,
         pad_mode="constant",
         pad_value=float(ignore_idx),
@@ -528,7 +522,7 @@ def main(
     # 4) Accumulate ALL token features + labels + image ids
     click.echo("Accumulating features and token labels...")
     X_all, y_all, img_ids_all = accumulate_features_and_labels(
-        decoder=decoder,
+        encoder=encoder,
         dataloader=train_loader,
         img_tiler=img_tiler,
         target_tiler=tgt_tiler,
@@ -667,7 +661,6 @@ def main(
             "grid_size": grid_size,
             "ignore_idx": ignore_idx,
             "tile": tile_size,
-            "stride": stride,
             "weighted_blend": weighted_blend,
             "pca_mode": (
                 "none"
@@ -683,6 +676,8 @@ def main(
             "num_tokens_used": int(X_used.shape[0]),
         },
     }
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output_path)
     click.echo(
         f"[OK] saved to {output_path}  "

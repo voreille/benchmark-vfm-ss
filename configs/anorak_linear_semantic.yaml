@@ -10,13 +10,13 @@ trainer:
       project: anorak
       group: linear_head
       job_type: baseline
-      tags: ["baseline"]
+      tags: ["baseline", "wahoo", "20x"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 data:
   class_path: datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_20x
     img_size: [672, 672]
     prefetch_factor: 4
     num_workers: 0

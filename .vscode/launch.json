@@ -158,50 +158,22 @@
                 "--device",
                 "0",
                 // optional: cap tokens per class (balanced across images)
-                // "--max-tokens-per-class", "50000",
+                "--max-tokens-per-class", "10000",
                 // optional: PCA settings (pick ONE style)
                 // "--proj-dim", "128",
                 // or
-                // "--pca-evr", "0.95",
+                "--pca-evr",
+                "0.45",
                 // optional: LEACE projection
                 // "--leace-proj-path", "output/leace_proj.pt",
                 "--output-path",
-                "output/anorak/protonet_stats_fold0.pt"
+                "output/anorak/h0_mini/protonet_stats_fold0.pt"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
-                "HYDRA_FULL_ERROR": "1"
-            },
-            "justMyCode": false
-        },
-        {
-            "name": "Python: predict ANORAK ProtoNet",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "protonet_cli.py",
-            "args": [
-                "predict",
-                "--imgs-npy",
-                "data/anorak_samples/images.npy",
-                "--load-path",
-                "output/anorak/prototypes_fold0.pt",
-                "--encoder-name",
-                "hf-hub:MahmoodLab/UNI2-h",
-                "--patch-size",
-                "14",
-                "--ckpt-path",
-                "",
-                "--device",
-                "0"
-            ],
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "1",
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false
@@ -218,13 +190,14 @@
                 "--root",
                 "data/",
                 "--trainer.callbacks+=training.pred_writer.SavePredictions",
-                "--trainer.callbacks.init_args.out_dir=output/anorak_proto/preds_fold0"
+                "--trainer.callbacks.init_args.out_dir=output/anorak_proto/preds_fold0",
+                "--trainer.logger=false",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "1",
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false

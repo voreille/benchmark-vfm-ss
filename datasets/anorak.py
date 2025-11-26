@@ -100,7 +100,7 @@ class ANORAK(LightningDataModule):
             self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
 
         if stage in ("predict", None):
-            self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
+            # self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
             self.test_dataset = PredictDataset(
                 test_ids, self.images_dir, self.masks_dir
             )
@@ -226,7 +226,7 @@ class ANORAKFewShot(LightningDataModule):
             self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
 
         if stage in ("predict", None):
-            self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
+            # self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
             self.test_dataset = PredictDataset(
                 test_ids, self.images_dir, self.masks_dir
             )
