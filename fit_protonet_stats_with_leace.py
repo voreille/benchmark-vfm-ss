@@ -8,6 +8,7 @@ import click
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchvision.transforms import CenterCrop
 from tqdm import tqdm
 
 try:
@@ -21,8 +22,7 @@ except ImportError:
     yaml = None
 
 from datasets.anorak import ANORAKFewShot
-from models.histo_protonet_decoder import ProtoNetDecoder
-from training.tiler import GridPadTiler, Tiler
+from training.tiler import GridPadTiler
 from models.histo_encoder import Encoder
 
 
@@ -120,9 +120,11 @@ def subsample_tokens_balanced_by_image(
         idx_c = torch.where(class_mask)[0]  # token indices for class c
 
         if idx_c.numel() == 0:
+            click.echo(f"Warning: no tokens found for class {c}.")
             continue
 
         if idx_c.numel() <= max_tokens_per_class:
+            click.echo(f"Class {c}: only {idx_c.numel()} tokens available")
             selected_indices.append(idx_c)
             continue
 
@@ -237,6 +239,8 @@ def accumulate_features_and_labels(
 
         if min(img_shape[1:]) < tile_size:
             continue  # skip too small images
+        # imgs = [CenterCrop(tile_size)(img) for img in imgs]
+        
 
         batch_img_ids = torch.arange(
             global_img_offset, global_img_offset + B_batch, dtype=torch.long
@@ -254,6 +258,7 @@ def accumulate_features_and_labels(
 
         sem_full = to_per_pixel_targets_semantic(targets, ignore_idx)
         sem_full = [y.unsqueeze(0) for y in sem_full]
+        # sem_full = [CenterCrop(tile_size)(y.unsqueeze(0)) for y in sem_full]
         tgt_crops, _, _ = target_tiler.window(sem_full)
         tgt_crops = tgt_crops.to(device)
 
@@ -562,24 +567,6 @@ def main(
 
     N_used, encoder_dim = X_used.shape
 
-    # 6) Optional LEACE projection (first projection)
-    leace_proj = None
-    if leace_proj_path:
-        click.echo(f"Loading LEACE projection from {leace_proj_path}...")
-        leace_proj = load_leace_proj(leace_proj_path, encoder_dim)
-        X_stage0 = X_used @ leace_proj  # [N_used, D_leace]
-        stage0_dim = leace_proj.shape[1]
-    else:
-        X_stage0 = X_used
-        stage0_dim = encoder_dim
-
-    # 7) Centering (optional; in stage0 space)
-    if center_enabled:
-        mean = X_stage0.mean(dim=0)  # [stage0_dim]
-        X_centered = X_stage0 - mean
-    else:
-        mean = torch.zeros(stage0_dim, dtype=X_stage0.dtype)
-        X_centered = X_stage0
 
     # 8) PCA (optional) – choose by proj-dim OR explained variance ratio
     proj_dim_val = proj_dim if proj_dim is not None else 0
@@ -590,6 +577,7 @@ def main(
 
     pca_enabled = (proj_dim_val > 0) or (pca_evr_val > 0.0)
 
+    mean = torch.zeros(encoder_dim, dtype=torch.float32)
     if pca_enabled:
         if PCA is None:
             raise ImportError(
@@ -607,16 +595,21 @@ def main(
             )
             pca = PCA(n_components=pca_evr_val)
 
-        X_np = X_centered.numpy()
-        Z_np = pca.fit_transform(X_np)  # [N_used, D_proj]
-        Z = torch.from_numpy(Z_np).float()
+        X_np = X_used.numpy()
+        pca.fit(X_np)  # [N_used, D_proj]
         proj_matrix = torch.from_numpy(
             pca.components_.T
-        ).float()  # [stage0_dim, D_proj]
+        ).float()
+        mean = torch.from_numpy(pca.mean_)
+        X_centered = X_used - mean  # [N_used, encoder_dim]
+        Z = X_centered @ proj_matrix  # [N_used, D_proj]
     else:
         click.echo("PCA disabled – using identity projection.")
-        proj_matrix = torch.eye(stage0_dim, stage0_dim, dtype=torch.float32)
-        Z = X_centered
+        proj_matrix = torch.eye(encoder_dim, encoder_dim, dtype=torch.float32)
+        Z = X_used
+        if center_enabled:
+            mean = X_used.mean(dim=0)
+            Z = X_used - mean
 
     # 9) Normalization (optional) in final space
     if norm_enabled:
@@ -646,15 +639,12 @@ def main(
         "num_classes": C,
         "embedding_dim": encoder_dim,  # original encoder feature dim
         "encoder_dim": encoder_dim,
-        "stage0_dim": stage0_dim,  # dim after LEACE (if any)
         "proj_dim": D_proj,  # final feature dim used in head
-        "leace_proj_matrix": leace_proj,  # None or [encoder_dim, stage0_dim]
         # config for ProtoNet head reconstruction
         "head_config": {
             "metric": metric.lower(),
             "center_feats": center_enabled,
             "normalize_feats": norm_enabled,
-            "use_leace": bool(leace_proj is not None),
             "use_pca": pca_enabled,
             "num_prototypes": C,
             "embedding_dim": D_proj,
@@ -688,7 +678,7 @@ def main(
     click.echo(
         f"[OK] saved to {output_path}  "
         f"prototypes={list(prototypes.shape)}, mean={list(mean.shape)}, "
-        f"final_dim={D_proj}, stage0_dim={stage0_dim}, encoder_dim={encoder_dim}"
+        f"final_dim={D_proj}, encoder_dim={encoder_dim}"
     )
 
     # 12) Save a lightweight YAML description (no tensors)
@@ -716,18 +706,12 @@ def main(
             "proj_matrix": list(payload["proj_matrix"].shape),
             "prototypes": list(payload["prototypes"].shape),
             "class_counts": list(payload["class_counts"].shape),
-            "leace_proj_matrix": (
-                list(payload["leace_proj_matrix"].shape)
-                if payload["leace_proj_matrix"] is not None
-                else None
-            ),
         },
         "head_config": head_cfg,
         "meta": {
             **{k: (list(v) if isinstance(v, tuple) else v) for k, v in meta.items()},
             "num_classes": int(payload["num_classes"]),
             "embedding_dim": int(payload["embedding_dim"]),
-            "stage0_dim": int(payload["stage0_dim"]),
             "proj_dim": int(payload["proj_dim"]),
         },
     }

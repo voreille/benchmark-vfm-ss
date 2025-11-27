@@ -133,15 +133,15 @@
             "name": "Python: fit ProtoNet stats ANORAK",
             "type": "debugpy",
             "request": "launch",
-            "program": "fit_protonet_stats.py",
+            "program": "fit_protonet_stats_with_leace.py",
             "args": [
                 "--root-dir",
                 "data/ANORAK_10x",
                 "--fold",
                 "0",
                 "--img-size",
-                "672",
-                "672",
+                "448",
+                "448",
                 "--batch-size",
                 "1",
                 "--num-workers",
@@ -158,12 +158,12 @@
                 "--device",
                 "0",
                 // optional: cap tokens per class (balanced across images)
-                "--max-tokens-per-class", "10000",
+                "--max-tokens-per-class", "5000",
                 // optional: PCA settings (pick ONE style)
                 // "--proj-dim", "128",
                 // or
                 "--pca-evr",
-                "0.45",
+                "0.95",
                 // optional: LEACE projection
                 // "--leace-proj-path", "output/leace_proj.pt",
                 "--output-path",
