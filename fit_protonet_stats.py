@@ -64,8 +64,7 @@ def to_per_pixel_targets_semantic(
 def masks_to_token_hard_nearest(
     targets_sem: torch.Tensor,  # [B,1,H,W] or [B,H,W] long
     grid_size: Tuple[int, int],  # (Ht, Wt)
-    ignore_idx: int = 255,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     Very simple mask -> token mapping:
 
@@ -90,8 +89,7 @@ def masks_to_token_hard_nearest(
     small = small.squeeze(1)  # [B,Ht,Wt]
 
     y_tokens = small.flatten(1)  # [B,Q]
-    valid = y_tokens != ignore_idx  # [B,Q] bool
-    return y_tokens, valid
+    return y_tokens
 
 
 def subsample_tokens_balanced_by_image(
@@ -217,14 +215,8 @@ def accumulate_features_and_labels(
     ignore_idx: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Tile images & masks, extract token features, map masks->tokens, accumulate.
+    Ht, Wt = grid_size
 
-    Returns:
-      X_all:       [N, D_in]  encoder features (CPU)
-      y_all:       [N]        hard token labels
-      img_ids_all: [N]        image index id for each token
-    """
     X_list: list[torch.Tensor] = []
     y_list: list[torch.Tensor] = []
     img_ids_list: list[torch.Tensor] = []
@@ -232,67 +224,55 @@ def accumulate_features_and_labels(
     encoder.eval()
     encoder.to(device)
 
-    global_img_offset = 0  # to give each original image a unique id across batches
+    global_img_offset = 0
+
+    grid_sum = torch.zeros(Ht, Wt, encoder.embed_dim, device=device)
+    grid_count = 0
 
     for imgs, targets in tqdm(dataloader, desc="collect tokens", leave=False):
-        # imgs: batch of variable-size images (Tensor or list); targets: list[dict]
         B_batch = len(imgs)
-
-        # assign global image ids for this batch
         batch_img_ids = torch.arange(
             global_img_offset, global_img_offset + B_batch, dtype=torch.long
         )
         global_img_offset += B_batch
 
-        # 1) tile images
-        img_crops, origins, img_sizes = img_tiler.window(
-            imgs
-        )  # [Nc,3,T,T], list(origins)
+        img_crops, origins, img_sizes = img_tiler.window(imgs)
         img_crops = img_crops.to(device) / 255.0
-
         Nc = img_crops.shape[0]
 
-        # map each crop to its original image id using origins[i].img_idx
         crop_img_ids = torch.empty(Nc, dtype=torch.long)
         for i, ori in enumerate(origins):
             b_idx = ori.img_idx
             crop_img_ids[i] = batch_img_ids[b_idx]
 
-        # 2) targets (instance->semantic->tile)
-        sem_full = to_per_pixel_targets_semantic(targets, ignore_idx)  # list of [H,W]
-        sem_full = [y.unsqueeze(0) for y in sem_full]  # list of [1,H,W]
-        tgt_crops, _, _ = target_tiler.window(sem_full)  # [Nc,1,T,T]
+        sem_full = to_per_pixel_targets_semantic(targets, ignore_idx)
+        sem_full = [y.unsqueeze(0) for y in sem_full]
+        tgt_crops, _, _ = target_tiler.window(sem_full)
         tgt_crops = tgt_crops.to(device)
 
-        # 3) tokens from encoder
-        tokens = encoder(img_crops)  # [Nc, Q, D_in]
+        tokens = encoder(img_crops)  # [Nc, Q, D]
         Nc, Q, D = tokens.shape
 
-        # 4) simple mask->token mapping (downsample to ViT grid)
-        y_tokens, valid = masks_to_token_hard_nearest(
-            tgt_crops,  # [Nc,1,T,T]
+        y_tokens = masks_to_token_hard_nearest(
+            tgt_crops,
             grid_size=grid_size,
-            ignore_idx=ignore_idx,
-        )  # y_tokens: [Nc,Q], valid: [Nc,Q]
+        )  # [Nc, Q]
 
-        X = tokens.reshape(Nc * Q, D)  # [Nc*Q, D]
-        y = y_tokens.reshape(Nc * Q)  # [Nc*Q]
-        m = valid.reshape(Nc * Q)  # [Nc*Q]
+        X_grid = tokens.reshape(Nc, Ht, Wt, D)  # [Nc, Ht, Wt, D]
 
-        # 5) expand crop_img_ids to per-token img_ids
+        # update grid-wise sum
+        grid_sum += X_grid.sum(dim=0)  # [Ht, Wt, D]
+        grid_count += Nc
+
+        y = y_tokens.reshape(Nc * Q)
         token_img_ids = crop_img_ids.unsqueeze(1).expand(Nc, Q).reshape(Nc * Q)
 
-        # keep only valid tokens
-        X = X[m].cpu()
-        y = y[m].cpu()
-        img_ids = token_img_ids[m.cpu()].cpu()
-
-        if X.numel() == 0:
+        if X_grid.numel() == 0:
             continue
 
-        X_list.append(X)
-        y_list.append(y)
-        img_ids_list.append(img_ids)
+        X_list.append(X_grid.cpu())
+        y_list.append(y.cpu())
+        img_ids_list.append(token_img_ids.cpu())
 
     if not X_list:
         return (
@@ -301,9 +281,28 @@ def accumulate_features_and_labels(
             torch.empty(0, dtype=torch.long),
         )
 
-    X_all = torch.cat(X_list, dim=0)  # [N,D_in]
+    grid_mean = (grid_sum / grid_count).cpu()  # [Ht, Wt, D]
+
+    # subtract mean and flatten, then mask ignore_idx
+    for idx, X_grid in enumerate(X_list):
+        X_grid = X_grid - grid_mean  # [Nc, Ht, Wt, D]
+        y = y_list[idx]
+        m = y != ignore_idx
+        if not m.any():
+            # all tokens ignored -> drop this batch
+            X_list[idx] = torch.empty(0, encoder.embed_dim)
+            img_ids_list[idx] = torch.empty(0, dtype=torch.long)
+            y_list[idx] = torch.empty(0, dtype=torch.long)
+            continue
+
+        X_flat = X_grid.reshape(-1, encoder.embed_dim)[m]
+        y_list[idx] = y[m]
+        img_ids_list[idx] = img_ids_list[idx][m]
+        X_list[idx] = X_flat
+
+    X_all = torch.cat(X_list, dim=0)  # [N, D]
     y_all = torch.cat(y_list, dim=0)  # [N]
-    img_ids_all = torch.cat(img_ids_list, 0)  # [N]
+    img_ids_all = torch.cat(img_ids_list, dim=0)
 
     return X_all, y_all, img_ids_all
 
