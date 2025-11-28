@@ -144,6 +144,7 @@ class Encoder(nn.Module):
         img_size: tuple[int, int] = (448, 448),
         ckpt_path: str = "",
         sub_norm: bool = False,
+        discard_last_mlp: bool = False,
     ):
         super().__init__()
 

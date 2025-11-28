@@ -24,6 +24,7 @@ except ImportError:
 from datasets.anorak import ANORAKFewShot
 from training.tiler import GridPadTiler
 from models.histo_encoder import Encoder
+from leace.leace import LeaceEraser, LeaceFitter
 
 
 # ---------------------------
@@ -173,40 +174,6 @@ def subsample_tokens_balanced_by_image(
     return X[idx], y[idx], img_ids[idx]
 
 
-def load_leace_proj(path: str, in_dim: int) -> torch.Tensor:
-    """
-    Load a LEACE projection matrix from a .pt file.
-
-    Accepts either:
-      - a Tensor of shape [in_dim, D_leace], or
-      - a dict containing key 'proj_matrix' (or 'P') with that tensor.
-    """
-    obj = torch.load(path, map_location="cpu")
-    if isinstance(obj, dict):
-        if "proj_matrix" in obj:
-            P = obj["proj_matrix"]
-        elif "P" in obj:
-            P = obj["P"]
-        else:
-            raise ValueError(
-                f"LEACE file {path} is a dict but has no 'proj_matrix' or 'P' key."
-            )
-    elif torch.is_tensor(obj):
-        P = obj
-    else:
-        raise TypeError(
-            f"LEACE file {path} must be a Tensor or dict with 'proj_matrix'/'P'."
-        )
-
-    if P.ndim != 2:
-        raise ValueError(f"LEACE proj_matrix must be 2D, got shape {tuple(P.shape)}.")
-    if P.shape[0] != in_dim:
-        raise ValueError(
-            f"LEACE proj_matrix first dim {P.shape[0]} != encoder dim {in_dim}."
-        )
-    return P.float()
-
-
 @torch.no_grad()
 def accumulate_features_and_labels(
     encoder: Encoder,
@@ -216,7 +183,7 @@ def accumulate_features_and_labels(
     grid_size: Tuple[int, int],
     ignore_idx: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, LeaceEraser | None]:
     Ht, Wt = grid_size
 
     X_list: list[torch.Tensor] = []
@@ -227,20 +194,25 @@ def accumulate_features_and_labels(
     encoder.to(device)
 
     global_img_offset = 0
-
-    grid_sum = torch.zeros(Ht, Wt, encoder.embed_dim, device=device)
-    grid_count = 0
     tile_size = img_tiler.tile
+
+    # positions in token grid, used as concept z
+    gy, gx = torch.meshgrid(
+        torch.arange(Ht, device=device),
+        torch.arange(Wt, device=device),
+        indexing="ij",
+    )
+    positions = torch.stack([gy, gx], dim=-1).reshape(-1, 2).float()  # [Q,2]
+    pos_leace_fitter = LeaceFitter(x_dim=encoder.embed_dim, z_dim=2, device=device)
 
     for imgs, targets in tqdm(dataloader, desc="collect tokens", leave=False):
         B_batch = len(imgs)
+        # you assume batch_size=1 later, keep the assert
         assert B_batch == 1
         img_shape = imgs[0].shape  # [C,H,W]
 
         if min(img_shape[1:]) < tile_size:
             continue  # skip too small images
-        # imgs = [CenterCrop(tile_size)(img) for img in imgs]
-        
 
         batch_img_ids = torch.arange(
             global_img_offset, global_img_offset + B_batch, dtype=torch.long
@@ -258,65 +230,65 @@ def accumulate_features_and_labels(
 
         sem_full = to_per_pixel_targets_semantic(targets, ignore_idx)
         sem_full = [y.unsqueeze(0) for y in sem_full]
-        # sem_full = [CenterCrop(tile_size)(y.unsqueeze(0)) for y in sem_full]
         tgt_crops, _, _ = target_tiler.window(sem_full)
         tgt_crops = tgt_crops.to(device)
 
         tokens = encoder(img_crops)  # [Nc, Q, D]
         Nc, Q, D = tokens.shape
+        assert Q == Ht * Wt, f"Q={Q} != Ht*Wt={Ht * Wt}"
 
         y_tokens = masks_to_token_hard_nearest(
             tgt_crops,
             grid_size=grid_size,
         )  # [Nc, Q]
 
-        X_grid = tokens.reshape(Nc, Ht, Wt, D)  # [Nc, Ht, Wt, D]
+        valid = y_tokens != ignore_idx  # [Nc, Q] bool
 
-        # update grid-wise sum
-        grid_sum += X_grid.sum(dim=0)  # [Ht, Wt, D]
-        grid_count += Nc
+        X_flat = tokens.reshape(Nc * Q, D)  # [Nc*Q, D]
+        pos_expanded = positions.unsqueeze(0).expand(Nc, Q, 2)  # [Nc,Q,2]
+        pos_expanded = pos_expanded.reshape(Nc * Q, 2)  # [Nc*Q,2]
 
-        y = y_tokens.reshape(Nc * Q)
+        # Update LEACE on *all* tokens (including ignored), since concept is position
+        pos_leace_fitter.update(X_flat, pos_expanded)
+
+        y_flat = y_tokens.reshape(Nc * Q)  # [Nc*Q]
+        m = valid.reshape(Nc * Q)  # [Nc*Q]
+
         token_img_ids = crop_img_ids.unsqueeze(1).expand(Nc, Q).reshape(Nc * Q)
 
-        if X_grid.numel() == 0:
+        # keep only valid tokens for prototypes
+        X = X_flat[m].cpu()
+        y = y_flat[m].cpu()
+        img_ids = token_img_ids[m.cpu()].cpu()
+
+        if X.numel() == 0:
             continue
 
-        X_list.append(X_grid.cpu())
-        y_list.append(y.cpu())
-        img_ids_list.append(token_img_ids.cpu())
+        X_list.append(X)
+        y_list.append(y)
+        img_ids_list.append(img_ids)
 
+    # if nothing collected
     if not X_list:
         return (
             torch.empty(0, encoder.embed_dim),
             torch.empty(0, dtype=torch.long),
             torch.empty(0, dtype=torch.long),
+            None,
         )
 
-    grid_mean = (grid_sum / grid_count).cpu()  # [Ht, Wt, D]
-
-    # subtract mean and flatten, then mask ignore_idx
-    for idx, X_grid in enumerate(X_list):
-        X_grid = X_grid - grid_mean  # [Nc, Ht, Wt, D]
-        y = y_list[idx]
-        m = y != ignore_idx
-        if not m.any():
-            # all tokens ignored -> drop this batch
-            X_list[idx] = torch.empty(0, encoder.embed_dim)
-            img_ids_list[idx] = torch.empty(0, dtype=torch.long)
-            y_list[idx] = torch.empty(0, dtype=torch.long)
-            continue
-
-        X_flat = X_grid.reshape(-1, encoder.embed_dim)[m]
-        y_list[idx] = y[m]
-        img_ids_list[idx] = img_ids_list[idx][m]
-        X_list[idx] = X_flat
-
-    X_all = torch.cat(X_list, dim=0)  # [N, D]
+    X_all = torch.cat(X_list, dim=0)  # [N,D_in]
     y_all = torch.cat(y_list, dim=0)  # [N]
-    img_ids_all = torch.cat(img_ids_list, dim=0)
+    img_ids_all = torch.cat(img_ids_list, 0)  # [N]
 
-    return X_all, y_all, img_ids_all
+    # LEACE eraser, if we saw enough data
+    pos_eraser: LeaceEraser | None
+    if pos_leace_fitter.n <= 1:
+        pos_eraser = None
+    else:
+        pos_eraser = pos_leace_fitter.eraser
+
+    return X_all, y_all, img_ids_all, pos_eraser
 
 
 def build_train_loader(
@@ -530,9 +502,8 @@ def main(
         prefetch_factor=prefetch_factor,
     )
 
-    # 4) Accumulate ALL token features + labels + image ids
     click.echo("Accumulating features and token labels...")
-    X_all, y_all, img_ids_all = accumulate_features_and_labels(
+    X_all, y_all, img_ids_all, pos_eraser = accumulate_features_and_labels(
         encoder=encoder,
         dataloader=train_loader,
         img_tiler=img_tiler,
@@ -549,7 +520,6 @@ def main(
         f"Collected {X_all.shape[0]} valid tokens, feature dim = {X_all.shape[1]}."
     )
 
-    # 5) Optional: rebalance tokens by class with maximum image coverage
     X_used, y_used, img_ids_used = subsample_tokens_balanced_by_image(
         X_all,
         y_all,
@@ -557,6 +527,7 @@ def main(
         num_classes=num_classes,
         max_tokens_per_class=max_tokens_per_class,
     )
+
     click.echo(
         f"Using {X_used.shape[0]} tokens after balancing "
         f"(max_tokens_per_class={max_tokens_per_class})."
@@ -567,8 +538,6 @@ def main(
 
     N_used, encoder_dim = X_used.shape
 
-
-    # 8) PCA (optional) – choose by proj-dim OR explained variance ratio
     proj_dim_val = proj_dim if proj_dim is not None else 0
     pca_evr_val = float(pca_evr) if pca_evr is not None else 0.0
 
@@ -576,6 +545,9 @@ def main(
         raise ValueError("Use either --proj-dim or --pca-evr, not both.")
 
     pca_enabled = (proj_dim_val > 0) or (pca_evr_val > 0.0)
+
+    if pos_eraser is not None:
+        X_used = pos_eraser(X_used)
 
     mean = torch.zeros(encoder_dim, dtype=torch.float32)
     if pca_enabled:
@@ -597,9 +569,7 @@ def main(
 
         X_np = X_used.numpy()
         pca.fit(X_np)  # [N_used, D_proj]
-        proj_matrix = torch.from_numpy(
-            pca.components_.T
-        ).float()
+        proj_matrix = torch.from_numpy(pca.components_.T).float()
         mean = torch.from_numpy(pca.mean_)
         X_centered = X_used - mean  # [N_used, encoder_dim]
         Z = X_centered @ proj_matrix  # [N_used, D_proj]
@@ -611,12 +581,10 @@ def main(
             mean = X_used.mean(dim=0)
             Z = X_used - mean
 
-    # 9) Normalization (optional) in final space
     if norm_enabled:
         Z = F.normalize(Z, dim=-1)
     D_proj = Z.shape[1]
 
-    # 10) Compute class prototypes (on used tokens in final space)
     click.echo("Computing prototypes...")
     C = num_classes
     prototypes = torch.zeros(C, D_proj, dtype=torch.float32)
@@ -629,17 +597,20 @@ def main(
             prototypes[c] = Zc.mean(dim=0)
             class_counts[c] = float(mask_c.sum().item())
 
-    # 11) Save everything (.pt)
     payload = {
         # stats for the pipeline
-        "mean": mean,  # [stage0_dim]
-        "proj_matrix": proj_matrix,  # [stage0_dim, D_proj]
-        "prototypes": prototypes,  # [C, D_proj]
-        "class_counts": class_counts,  # [C]
+        "mean": mean,
+        "proj_matrix": proj_matrix,
+        "prototypes": prototypes,
+        "class_counts": class_counts,
         "num_classes": C,
-        "embedding_dim": encoder_dim,  # original encoder feature dim
+        "embedding_dim": encoder_dim,
         "encoder_dim": encoder_dim,
-        "proj_dim": D_proj,  # final feature dim used in head
+        "proj_dim": D_proj,
+        # NEW: LEACE eraser on positions
+        "leace_position_eraser": (
+            pos_eraser.state_dict() if pos_eraser is not None else None
+        ),
         # config for ProtoNet head reconstruction
         "head_config": {
             "metric": metric.lower(),
@@ -649,7 +620,6 @@ def main(
             "num_prototypes": C,
             "embedding_dim": D_proj,
         },
-        # extra meta for reproducibility
         "meta": {
             "encoder_id": encoder_id,
             "ckpt_path": ckpt_path,
@@ -670,8 +640,11 @@ def main(
             "max_tokens_per_class": max_tokens_per_class,
             "leace_proj_path": leace_proj_path,
             "num_tokens_used": int(X_used.shape[0]),
+            # maybe record that this LEACE is on positions
+            "leace_on": "token_grid_position",
         },
     }
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output_path)

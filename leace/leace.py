@@ -1,6 +1,7 @@
 # reproduced from https://github.com/EleutherAI/concept-erasure/tree/main
 
 from dataclasses import dataclass
+from os import PathLike
 from typing import Literal
 
 import torch
@@ -29,6 +30,34 @@ class LeaceEraser:
     def fit(cls, x: Tensor, z: Tensor, **kwargs) -> "LeaceEraser":
         """Convenience method to fit a LeaceEraser on data and return it."""
         return LeaceFitter.fit(x, z, **kwargs).eraser
+
+    def state_dict(self) -> dict:
+        # asdict works, but I'll be explicit so it's clear what is saved
+        return {
+            "proj_left": self.proj_left,
+            "proj_right": self.proj_right,
+            "bias": self.bias,
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: dict) -> "LeaceEraser":
+        return cls(
+            proj_left=state["proj_left"],
+            proj_right=state["proj_right"],
+            bias=state["bias"],
+        )
+
+    def save(self, path: str | PathLike) -> None:
+        torch.save(self.state_dict(), path)
+
+    @classmethod
+    def load(
+        cls,
+        path: str | PathLike,
+        map_location: torch.device | str | None = None,
+    ) -> "LeaceEraser":
+        state = torch.load(path, map_location=map_location)
+        return cls.from_state_dict(state)
 
     @property
     def P(self) -> Tensor:
@@ -237,9 +266,7 @@ class LeaceFitter:
 
                 # Solve for the mixture of P and Q that makes the trace equal to the
                 # trace of the original covariance matrix
-                discr = torch.sqrt(
-                    4 * w * x - 4 * w * y + 4 * w * z - 4 * x * z + y**2
-                )
+                discr = torch.sqrt(4 * w * x - 4 * w * y + 4 * w * z - 4 * x * z + y**2)
                 alpha1 = (-y / 2 + z - discr / 2) / (x - y + z)
                 alpha2 = (-y / 2 + z + discr / 2) / (x - y + z)
 
@@ -260,9 +287,9 @@ class LeaceFitter:
     def sigma_xx(self) -> Tensor:
         """The covariance matrix of X."""
         assert self.n > 1, "Call update() before accessing sigma_xx"
-        assert (
-            self.sigma_xx_ is not None
-        ), "Covariance statistics are not being tracked for X"
+        assert self.sigma_xx_ is not None, (
+            "Covariance statistics are not being tracked for X"
+        )
 
         # Accumulated numerical error may cause this to be slightly non-symmetric
         S_hat = (self.sigma_xx_ + self.sigma_xx_.mH) / 2
